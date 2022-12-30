@@ -91,7 +91,7 @@ struct dm_btree_info {
 /*
  * Set up an empty tree.  O(1).
  */
-int dm_btree_empty(struct dm_btree_info *info, dm_block_t *root);
+int dm_btree_empty(struct dm_btree_info *info, dm_block_t *root, int no);
 
 /*
  * Delete a tree.  O(n) - this is the slow one!  It can also block, so

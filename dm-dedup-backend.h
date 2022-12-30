@@ -88,6 +88,13 @@ struct metadata_ops {
 
 	/*
 	 * Returns -ERR code on error.
+	 * Returns refcount on success.
+	 */
+	int (*set_refcount)(struct metadata *md, uint64_t blockn, uint32_t val);
+
+
+	/*
+	 * Returns -ERR code on error.
 	 * Return 0 on success.
 	 */
 	int (*flush_meta)(struct metadata *md);
@@ -116,6 +123,8 @@ struct metadata_ops {
 	 * tasks.
 	 */
 	void (*flush_bufio_cache)(struct metadata *md);
+
+	void* (*get_bufio_client)(struct metadata *md);
 };
 
 #endif /* BACKEND_H */

@@ -596,8 +596,10 @@ struct metadata_ops metadata_ops_inram = {
 	.inc_refcount = inc_refcount_inram,
 	.dec_refcount = dec_refcount_inram,
 	.get_refcount = get_refcount_inram,
+	.set_refcount = NULL,
 
 	.flush_meta = flush_meta_inram,
 
 	.flush_bufio_cache = NULL,
+	.get_bufio_client = NULL,
 };

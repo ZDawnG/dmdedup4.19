@@ -76,6 +76,20 @@ struct dedup_config {
 	u64	reads_on_writes;
 	u64	overwrites;	/* writes to a prev. written offset */
 	u64	newwrites;	/* writes to never written offsets */
+	u64 gc_count; 	//num of calling gc;
+	u64 gc_fp_count;// num of cleaned hash_pbn item
+	u64 gc_threhold;// num of the bound
+	u64 gc_type; 	// =0 percntage, =1 certain number
+
+	u64 hit_none_fp;
+	u64 hit_right_fp;
+	u64 hit_wrong_fp;
+	u64 hit_corrupt_fp;
+
+	u64 invalid_fp;
+	u64 inserted_fp;
+
+	u64 remote_len;
 
 	/* flag to check for data corruption */
 	bool	check_corruption;
@@ -106,6 +120,18 @@ struct dedup_config {
 /* Value of the HASH-PBN key-value store */
 struct hash_pbn_value {
 	u64 pbn;	/* in blocks */
+};
+
+/* Type means if it's tarSSD no. Ver means version no.*/
+typedef struct type_value {
+	u32 ver:31;
+	u32 type:1;
+}t_v;
+
+/* Value of the HASH-PBN key-value store */
+struct hash_pbn_value_x {
+	u64 pbn;	/* in blocks */
+	t_v tv; 
 };
 
 /* Value of the LBN-PBN key-value store */

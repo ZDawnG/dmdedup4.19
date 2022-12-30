@@ -23,10 +23,11 @@
 #include "persistent-data/dm-block-manager.h"
 #include "persistent-data/dm-transaction-manager.h"
 
-#include "dm-dedup-cbt.h"
+#include "dm-dedup-xremap.h"
 #include "dm-dedup-backend.h"
 #include "dm-dedup-kvstore.h"
 
+#define EMPTY_ENTRY 0xFF
 #define DELETED_ENTRY 0x6B
 
 #define UINT32_MAX	(4294967295U)
@@ -39,6 +40,8 @@
 #define DM_DEDUP_VERSION 1
 #define SUPERBLOCK_CSUM_XOR 189575
 struct metadata {
+	u32 *smap;
+	u64 smax;
 	struct dm_block_manager *meta_bm;
 	struct dm_transaction_manager *tm;
 	struct dm_space_map *data_sm;
@@ -47,20 +50,20 @@ struct metadata {
 	/*
 	 * XXX: Currently we support only one linear and one sparse KVS.
 	 */
-	struct kvstore_cbt_linear *kvs_linear;
-	struct kvstore_cbt_sparse *kvs_sparse;
+	struct kvstore_xremap_linear *kvs_linear;
+	struct kvstore_xremap_sparse *kvs_sparse;
 
 	u8 private_data[PRIVATE_DATA_SIZE];
 
 };
 
-struct kvstore_cbt_linear {
+struct kvstore_xremap_linear {
 	struct kvstore ckvs;
-	struct dm_btree_info info;
-	u64 root;
+	u32 kmax;
+	char *store;
 };
 
-struct kvstore_cbt_sparse {
+struct kvstore_xremap_sparse {
 	struct kvstore ckvs;
 	u32 entry_size;
 	struct dm_btree_info info;
@@ -94,7 +97,7 @@ struct metadata_superblock {
 	/* Metadata space map */
 	__u8 metadata_space_map_root[SPACE_MAP_ROOT_SIZE];
 	__u8 data_space_map_root[SPACE_MAP_ROOT_SIZE]; /* Data space map */
-	__le64 lbn_pbn_root; /* lbn pbn btree root. */
+	//__le64 lbn_pbn_root; /* lbn pbn btree root. */
 	__le64 hash_pbn_root; /* hash pbn btree root. */
 	__le32 data_block_size;	/* In bytes */
 	__le32 metadata_block_size; /* In bytes */
@@ -104,7 +107,7 @@ struct metadata_superblock {
 
 /*
  * It initializes the root of linear and sparse cow btrees and also
- * in case sparse cowbtree restores last set max linear probing value
+ * in case sparse xremap restores last set max linear probing value
  * from superblock stored in metadata device.
  *
  * Return -ERR code on failure.
@@ -123,8 +126,8 @@ static int __begin_transaction(struct metadata *md)
 
 	disk_super = dm_block_data(sblock);
 
-	if (md->kvs_linear)
-		md->kvs_linear->root = le64_to_cpu(disk_super->lbn_pbn_root);
+	/* if (md->kvs_linear)
+		md->kvs_linear->root = le64_to_cpu(disk_super->lbn_pbn_root); */
 
 	if (md->kvs_sparse) {
 		md->kvs_sparse->root = le64_to_cpu(disk_super->hash_pbn_root);
@@ -183,8 +186,8 @@ static int __commit_transaction(struct metadata *md, bool clean_shutdown_flag)
 	else
 		disk_super->flags &= ~(1 << CLEAN_SHUTDOWN);
 
-	if (md->kvs_linear)
-		disk_super->lbn_pbn_root = cpu_to_le64(md->kvs_linear->root);
+	/* if (md->kvs_linear)
+		disk_super->lbn_pbn_root = cpu_to_le64(md->kvs_linear->root); */
 
 	if (md->kvs_sparse) {
 		disk_super->hash_pbn_root = cpu_to_le64(md->kvs_sparse->root);
@@ -384,18 +387,19 @@ out:
 	return r;
 }
 
-static struct metadata *init_meta_cowbtree(void *input_param, bool *unformatted)
+static struct metadata *init_meta_xremap(void *input_param, bool *unformatted)
 {
 	int ret;
+	u64 smap_size, tmp;
 	struct metadata *md;
 	struct dm_block_manager *meta_bm;
 	struct dm_space_map *meta_sm;
 	struct dm_space_map *data_sm = NULL;
 	struct dm_transaction_manager *tm;
-	struct init_param_cowbtree *p =
-				(struct init_param_cowbtree *)input_param;
+	struct init_param_xremap *p =
+				(struct init_param_xremap *)input_param;
 
-	DMINFO("Initializing COWBTREE backend");
+	DMINFO("Initializing XREMAP backend");
 
 	md = kzalloc(sizeof(*md), GFP_NOIO);
 	if (!md)
@@ -492,6 +496,22 @@ begin_trans:
 		goto badwritesuper;
 	}
 
+	smap_size = p->blocks * sizeof(uint32_t);
+
+	md->smap = vmalloc(smap_size);
+	if (!md->smap) {
+		kfree(md);
+		goto badwritesuper;
+	}
+
+	tmp = smap_size;
+	(void)do_div(tmp, (1024 * 1024));
+	DMINFO("Space allocated for T&V table: %llu.%06llu MB",
+	       tmp, smap_size - (tmp * (1024 * 1024)));
+
+	memset(md->smap, 0, smap_size);
+
+	md->smax = p->blocks;
 	md->kvs_linear = NULL;
 	md->kvs_sparse = NULL;
 
@@ -509,7 +529,7 @@ badbm:
 	return md;
 }
 
-static void exit_meta_cowbtree(struct metadata *md)
+static void exit_meta_xremap(struct metadata *md)
 {
 	int ret;
 
@@ -524,13 +544,20 @@ static void exit_meta_cowbtree(struct metadata *md)
 	dm_sm_destroy(md->meta_sm);
 	dm_block_manager_destroy(md->meta_bm);
 
-	kfree(md->kvs_linear);
+	if (md->smap)
+		vfree(md->smap);
+	
+	if (md->kvs_linear) {
+		if (md->kvs_linear->store)
+			vfree(md->kvs_linear->store);
+		kfree(md->kvs_linear);
+	}
 	kfree(md->kvs_sparse);
 
 	kfree(md);
 }
 
-static int flush_meta_cowbtree(struct metadata *md)
+static int flush_meta_xremap(struct metadata *md)
 {
 	int r;
 
@@ -548,31 +575,65 @@ static int flush_meta_cowbtree(struct metadata *md)
  *		Space Management Functions		*
  ********************************************************/
 
-static int alloc_data_block_cowbtree(struct metadata *md, uint64_t *blockn)
+static int alloc_data_block_xremap(struct metadata *md, uint64_t *blockn)
 {
-	return dm_sm_new_block(md->data_sm, blockn);
+	return 0;
+	//return dm_sm_new_block(md->data_sm, blockn);
 }
 
-static int inc_refcount_cowbtree(struct metadata *md, uint64_t blockn)
+static int inc_refcount_xremap(struct metadata *md, uint64_t blockn)
 {
-	return dm_sm_inc_block(md->data_sm, blockn);
+	if (blockn >= md->smax)
+		return -ERANGE;
+
+	if (md->smap[blockn] != UINT32_MAX)
+		md->smap[blockn]++;
+	else
+		return -E2BIG;
+
+	return 0;
+	//return dm_sm_inc_block(md->data_sm, blockn);
 }
 
-static int dec_refcount_cowbtree(struct metadata *md, uint64_t blockn)
+static int dec_refcount_xremap(struct metadata *md, uint64_t blockn)
 {
-	return dm_sm_dec_block(md->data_sm, blockn);
+	if (blockn >= md->smax)
+		return -ERANGE;
+
+	if (md->smap[blockn])
+		md->smap[blockn]--;
+	else
+		return -EFAULT;
+
+	return 0;
+	//return dm_sm_dec_block(md->data_sm, blockn);
 }
 
-static int get_refcount_cowbtree(struct metadata *md, uint64_t blockn)
+static int get_refcount_xremap(struct metadata *md, uint64_t blockn)
 {
-	u32 refcount;
-	int r;
+	if (blockn >= md->smax)
+		return -ERANGE;
 
-	r = dm_sm_get_count(md->data_sm, blockn, &refcount);
-	if (r < 0)
-		return r;
+	return md->smap[blockn];
+}
 
-	return (int)refcount;
+static int set_refcount_xremap(struct metadata *md, uint64_t blockn, uint32_t val)
+{
+	if (blockn >= md->smax)
+		return -ERANGE;
+	md->smap[blockn] = val;
+	return 0;
+}
+
+
+static bool is_empty(char *ptr, int length)
+{
+	int i = 0;
+
+	while ((i < length) && (ptr[i] == EMPTY_ENTRY))
+		i++;
+
+	return i == length;
 }
 
 /*
@@ -580,7 +641,7 @@ static int get_refcount_cowbtree(struct metadata *md, uint64_t blockn)
  * (tombstone) or not.  We check if every byte in the
  * entry holds the value of DELETED_ENTRY.
  */
-bool is_deleted_entry(const char *ptr, uint32_t length)
+bool is_deleted_x_entry(const char *ptr, uint32_t length)
 {
 	int i = 0;
 
@@ -593,67 +654,78 @@ bool is_deleted_entry(const char *ptr, uint32_t length)
 /*********************************************************
  *		Linear KVS Functions			 *
  *********************************************************/
-/*
- * It deletes key from btree.
- *
- * Returns -ERR code in failure.
- * Returns 0 on success.
- */
-static int kvs_delete_linear_cowbtree(struct kvstore *kvs,
-			       void *key, int32_t ksize)
-{
-	int r;
-	struct kvstore_cbt_linear *kvcbt = NULL;
 
-	kvcbt = container_of(kvs, struct kvstore_cbt_linear, ckvs);
+static int kvs_delete_linear_xremap(struct kvstore *kvs,
+				   void *key, int32_t ksize)
+{
+	u64 idx;
+	char *ptr;
+	struct kvstore_xremap_linear *kvxremap = NULL;
+
+	kvxremap = container_of(kvs, struct kvstore_xremap_linear, ckvs);
 
 	if (ksize != kvs->ksize)
 		return -EINVAL;
 
-	r = dm_btree_remove(&(kvcbt->info), kvcbt->root, key, &(kvcbt->root));
+	idx = *((uint64_t *)key);
 
-	if (r == -ENODATA)
+	if (idx > kvxremap->kmax)
+		return -ERANGE;
+
+	ptr = kvxremap->store + kvs->vsize * idx;
+
+	if (is_empty(ptr, kvs->vsize))
 		return -ENODEV;
-	else if (r >= 0)
-		return 0;
 
-	return r;
+	memset(ptr, EMPTY_ENTRY, kvs->vsize);
+
+	return 0;
 }
 
 /*
- * 0 - on success
+ * 0 - if entry found
  * -ENODATA - if entry not found
  * <0 - error on lookup
  */
-static int kvs_lookup_linear_cowbtree(struct kvstore *kvs, void *key,
-				      s32 ksize, void *value, int32_t *vsize)
+static int kvs_lookup_linear_xremap(struct kvstore *kvs, void *key,
+				   s32 ksize, void *value,
+				   int32_t *vsize)
 {
+	u64 idx;
+	char *ptr;
 	int r = -ENODATA;
-	struct kvstore_cbt_linear *kvcbt = NULL;
+	struct kvstore_xremap_linear *kvxremap = NULL;
 
-	kvcbt = container_of(kvs, struct kvstore_cbt_linear, ckvs);
+	kvxremap = container_of(kvs, struct kvstore_xremap_linear, ckvs);
 
 	if (ksize != kvs->ksize)
 		return -EINVAL;
 
-	r = dm_btree_lookup(&(kvcbt->info), kvcbt->root, key, value);
+	idx = *((uint64_t *)key);
 
-	return r;
+	if (idx > kvxremap->kmax)
+		return -ERANGE;
+
+	ptr = kvxremap->store + kvs->vsize * idx;
+
+	if (is_empty(ptr, kvs->vsize))
+		return r;
+
+	memcpy(value, ptr, kvs->vsize);
+	*vsize = kvs->vsize;
+
+	return 0;
 }
 
-/* Inserts key into cow btree.
- *
- * Returns -ERR code in failure.
- * Reurns 0 on success.
- */
-static int kvs_insert_linear_cowbtree(struct kvstore *kvs, void *key,
-			       s32 ksize, void *value,
-			       int32_t vsize)
+static int kvs_insert_linear_xremap(struct kvstore *kvs, void *key,
+				   s32 ksize, void *value,
+				   int32_t vsize)
 {
-	int inserted;
-	struct kvstore_cbt_linear *kvcbt = NULL;
+	u64 idx;
+	char *ptr;
+	struct kvstore_xremap_linear *kvxremap = NULL;
 
-	kvcbt = container_of(kvs, struct kvstore_cbt_linear, ckvs);
+	kvxremap = container_of(kvs, struct kvstore_xremap_linear, ckvs);
 
 	if (ksize != kvs->ksize)
 		return -EINVAL;
@@ -661,20 +733,65 @@ static int kvs_insert_linear_cowbtree(struct kvstore *kvs, void *key,
 	if (vsize != kvs->vsize)
 		return -EINVAL;
 
-	__dm_bless_for_disk(value);
-	return dm_btree_insert_notify(&(kvcbt->info), kvcbt->root, key,
-				      value, &(kvcbt->root), &inserted);
+	idx = *((uint64_t *)key);
+
+	if (idx > kvxremap->kmax)
+		return -ERANGE;
+
+	ptr = kvxremap->store + kvs->vsize * idx;
+
+	memcpy(ptr, value, kvs->vsize);
+
+	return 0;
 }
 
-static struct kvstore *kvs_create_linear_cowbtree(struct metadata *md,
-						  u32 ksize, uint32_t vsize,
-						  u32 kmax,
-						  bool unformatted)
+/*
+ * NOTE: if iteration_action() is a deletion/cleanup function,
+ *	Make sure that the store is implemented such that
+ *	deletion in-place is safe while iterating.
+ */
+static int kvs_iterate_linear_xremap(struct kvstore *kvs,
+				    int (*iteration_action)
+				    (void *key, int32_t ksize,
+				     void *value, int32_t vsize,
+				     void *data), void *data)
 {
-	struct kvstore_cbt_linear *kvs;
-	int r;
+	int ret = 0;
+	u64 i = 0;
+	char *ptr = NULL;
+	struct kvstore_xremap_linear *kvxremap = NULL;
+	bool ret_empty;
 
-	if (!vsize || !ksize)
+	kvxremap = container_of(kvs, struct kvstore_xremap_linear, ckvs);
+
+	for (i = 0; i < kvxremap->kmax; i++) {
+		ptr = kvxremap->store + (i * kvs->vsize);
+
+		ret_empty = is_empty(ptr, kvs->vsize);
+
+		if (!ret_empty) {
+			ret = 0;
+			ret = iteration_action((void *)&i, kvs->ksize,
+					       (void *)ptr, kvs->vsize, data);
+			if (ret < 0)
+				goto out;
+		} else {
+			ret = 1;
+		}
+	}
+
+out:
+	return ret;
+}
+
+static struct kvstore *kvs_create_linear_xremap(struct metadata *md,
+					       u32 ksize, u32 vsize,
+					       u32 kmax, bool unformatted)
+{
+	struct kvstore_xremap_linear *kvs;
+	u64 kvstore_size, tmp;
+
+	if (!vsize || !ksize || !kmax)
 		return ERR_PTR(-ENOTSUPP);
 
 	/* Currently only 64bit keys are supported */
@@ -689,48 +806,31 @@ static struct kvstore *kvs_create_linear_cowbtree(struct metadata *md,
 	if (!kvs)
 		return ERR_PTR(-ENOMEM);
 
-	kvs->ckvs.ksize = ksize;
-	kvs->ckvs.vsize = vsize;
-
-	kvs->info.tm = md->tm;
-	kvs->info.levels = 1;
-	kvs->info.value_type.context = NULL;
-	kvs->info.value_type.size = vsize;
-	kvs->info.value_type.inc = NULL;
-	kvs->info.value_type.dec = NULL;
-	kvs->info.value_type.equal = NULL;
-
-	if (!unformatted) {
-		kvs->ckvs.kvs_insert = kvs_insert_linear_cowbtree;
-		kvs->ckvs.kvs_lookup = kvs_lookup_linear_cowbtree;
-		kvs->ckvs.kvs_delete = kvs_delete_linear_cowbtree;
-		kvs->ckvs.kvs_iterate = NULL;
-
-		md->kvs_linear = kvs;
-		__begin_transaction(md);
-	} else {
-		r = dm_btree_empty(&(kvs->info), &(kvs->root), 1);
-		if (r < 0) {
-			kvs = ERR_PTR(r);
-			goto badtree;
-		}
-
-		/* I think this should be moved below the 4 lines below */
-		flush_meta_cowbtree(md);
-
-		kvs->ckvs.kvs_insert = kvs_insert_linear_cowbtree;
-		kvs->ckvs.kvs_lookup = kvs_lookup_linear_cowbtree;
-		kvs->ckvs.kvs_delete = kvs_delete_linear_cowbtree;
-		kvs->ckvs.kvs_iterate = NULL;
-
-		md->kvs_linear = kvs;
+	kvstore_size = (kmax + 1) * vsize;
+	kvs->store = vmalloc(kvstore_size);
+	if (!kvs->store) {
+		kfree(kvs);
+		return ERR_PTR(-ENOMEM);
 	}
 
-	return &(kvs->ckvs);
+	tmp = kvstore_size;
+	(void)do_div(tmp, (1024 * 1024));
+	DMINFO("Space allocated for linear key value store: %llu.%06llu MB\n",
+	       tmp, kvstore_size - (tmp * (1024 * 1024)));
 
-badtree:
-	kfree(kvs);
-	return (struct kvstore *)kvs;
+	memset(kvs->store, EMPTY_ENTRY, kvstore_size);
+
+	kvs->ckvs.vsize = vsize;
+	kvs->ckvs.ksize = ksize;
+	kvs->kmax = kmax;
+
+	kvs->ckvs.kvs_insert = kvs_insert_linear_xremap;
+	kvs->ckvs.kvs_lookup = kvs_lookup_linear_xremap;
+	kvs->ckvs.kvs_delete = kvs_delete_linear_xremap;
+	kvs->ckvs.kvs_iterate = kvs_iterate_linear_xremap;
+	md->kvs_linear = kvs;
+
+	return &(kvs->ckvs);
 }
 
 /********************************************************
@@ -744,7 +844,7 @@ badtree:
  * Returns -ERR code in failure.
  * Returns 0 on success.
  */
-static int kvs_delete_entry(struct kvstore_cbt_sparse *kvcbt,
+static int kvs_delete_entry(struct kvstore_xremap_sparse *kvxremap,
 			    char *cur_entry, char *next_entry,
 			    u64 cur_key_val, int ret_next)
 {
@@ -753,11 +853,11 @@ static int kvs_delete_entry(struct kvstore_cbt_sparse *kvcbt,
 	if (ret_next == 0 &&
 	    memcmp(cur_entry, next_entry, sizeof(cur_key_val)) == 0) {
 		/* There is a next key and it is a linearly probed one. */
-		memset(cur_entry, DELETED_ENTRY, kvcbt->entry_size);
+		memset(cur_entry, DELETED_ENTRY, kvxremap->entry_size);
 			       __dm_bless_for_disk(&cur_key_val);
 
-		r = dm_btree_insert(&(kvcbt->info), kvcbt->root,
-				    &cur_key_val, cur_entry, &(kvcbt->root));
+		r = dm_btree_insert(&(kvxremap->info), kvxremap->root,
+				    &cur_key_val, cur_entry, &(kvxremap->root));
 		DMWARN("Marked as tombstone for keyval = %lld", cur_key_val);
 	} else {
 		/*
@@ -765,36 +865,36 @@ static int kvs_delete_entry(struct kvstore_cbt_sparse *kvcbt,
 		 * OR
 		 * There is no next key.
 		 */
-		r = dm_btree_remove(&(kvcbt->info),
-				    kvcbt->root,
+		r = dm_btree_remove(&(kvxremap->info),
+				    kvxremap->root,
 				    &cur_key_val,
-				    &(kvcbt->root));
+				    &(kvxremap->root));
 		DMWARN("Performed actual deletion for keyval = %lld",
 		       cur_key_val);
 	}
 	return r;
 }
 
-static int kvs_delete_sparse_cowbtree(struct kvstore *kvs,
+static int kvs_delete_sparse_xremap(struct kvstore *kvs,
 				      void *key, int32_t ksize)
 {
 	char *cur_entry, *next_entry;
 	u64 key_val, cur_key_val;
 	int r = 0;
-	struct kvstore_cbt_sparse *kvcbt = NULL;
+	struct kvstore_xremap_sparse *kvxremap = NULL;
 
-	kvcbt = container_of(kvs, struct kvstore_cbt_sparse, ckvs);
+	kvxremap = container_of(kvs, struct kvstore_xremap_sparse, ckvs);
 
 	if (ksize != kvs->ksize)
 		return -EINVAL;
 
-	cur_entry = kmalloc(kvcbt->entry_size, GFP_NOIO);
+	cur_entry = kmalloc(kvxremap->entry_size, GFP_NOIO);
 	if (!cur_entry)
 		return -ENOMEM;
 
 	key_val = (*(uint64_t *)key);
 
-	r = dm_btree_lookup(&(kvcbt->info), kvcbt->root, &key_val, cur_entry);
+	r = dm_btree_lookup(&(kvxremap->info), kvxremap->root, &key_val, cur_entry);
 
 	if (r == -ENODATA) {
 		return -ENODEV;
@@ -803,17 +903,17 @@ static int kvs_delete_sparse_cowbtree(struct kvstore *kvs,
 		cur_key_val = key_val;
 		key_val++;
 
-		next_entry = kmalloc(kvcbt->entry_size, GFP_NOIO);
+		next_entry = kmalloc(kvxremap->entry_size, GFP_NOIO);
 		if (!next_entry)
 			return -ENOMEM;
 
-		r = dm_btree_lookup(&(kvcbt->info),
-				     kvcbt->root,
+		r = dm_btree_lookup(&(kvxremap->info),
+				     kvxremap->root,
 				     &key_val, next_entry);
 
 		if (!memcmp(cur_entry, key, ksize)) {
 			/* Key found. */
-			r = kvs_delete_entry(kvcbt, cur_entry, next_entry,
+			r = kvs_delete_entry(kvxremap, cur_entry, next_entry,
 					     cur_key_val, r);
 			DMWARN("Deleted key successfully\n");
 			goto out;
@@ -836,20 +936,20 @@ out:
  * 1 - found
  * < 0 - error on lookup
  */
-static int kvs_lookup_sparse_cowbtree(struct kvstore *kvs, void *key,
+static int kvs_lookup_sparse_xremap(struct kvstore *kvs, void *key,
 				      s32 ksize, void *value, int32_t *vsize)
 {
 	char *entry;
 	u64 key_val;
 	int i, r = -ENODATA;
-	struct kvstore_cbt_sparse *kvcbt = NULL;
+	struct kvstore_xremap_sparse *kvxremap = NULL;
 
-	kvcbt = container_of(kvs, struct kvstore_cbt_sparse, ckvs);
+	kvxremap = container_of(kvs, struct kvstore_xremap_sparse, ckvs);
 
 	if (ksize != kvs->ksize)
 		return -EINVAL;
 
-	entry = kmalloc(kvcbt->entry_size, GFP_NOIO);
+	entry = kmalloc(kvxremap->entry_size, GFP_NOIO);
 	if (!entry)
 		return -ENOMEM;
 
@@ -862,8 +962,8 @@ static int kvs_lookup_sparse_cowbtree(struct kvstore *kvs, void *key,
 	 * XXX:Need to put lock around whole code since multiple threads
 	 * might be accessing this limit.
 	 */
-	for (i = 0; i <= kvcbt->lpc_cur; i++) {
-		r = dm_btree_lookup(&(kvcbt->info), kvcbt->root, &key_val,
+	for (i = 0; i <= kvxremap->lpc_cur; i++) {
+		r = dm_btree_lookup(&(kvxremap->info), kvxremap->root, &key_val,
 		entry);
 		/* if entry not found in btree */
 		if (r == -ENODATA) {
@@ -876,7 +976,7 @@ static int kvs_lookup_sparse_cowbtree(struct kvstore *kvs, void *key,
 				kfree(entry);
 				return 0;
 			}
-			DMWARN("kvs_lookup_sparse_cowbtree: hash collision for "
+			DMWARN("kvs_lookup_sparse_xremap: hash collision for "
 			"key :%llu %s", key_val, entry);
 			key_val++;
 		} else {
@@ -896,15 +996,15 @@ static int kvs_lookup_sparse_cowbtree(struct kvstore *kvs, void *key,
  * Returns -ERR code on failure.
  * Returns 0 on success.
  */
-static int kvs_insert_sparse_cowbtree(struct kvstore *kvs, void *key,
+static int kvs_insert_sparse_xremap(struct kvstore *kvs, void *key,
 			       s32 ksize, void *value, int32_t vsize)
 {
 	char *entry;
 	u64 key_val;
 	int i, r;
-	struct kvstore_cbt_sparse *kvcbt = NULL;
+	struct kvstore_xremap_sparse *kvxremap = NULL;
 
-	kvcbt = container_of(kvs, struct kvstore_cbt_sparse, ckvs);
+	kvxremap = container_of(kvs, struct kvstore_xremap_sparse, ckvs);
 
 	if (ksize != kvs->ksize)
 		return -EINVAL;
@@ -912,31 +1012,31 @@ static int kvs_insert_sparse_cowbtree(struct kvstore *kvs, void *key,
 	if (vsize != kvs->vsize)
 		return -EINVAL;
 
-	entry = kmalloc(kvcbt->entry_size, GFP_NOIO);
+	entry = kmalloc(kvxremap->entry_size, GFP_NOIO);
 	if (!entry)
 		return -ENOMEM;
 
 	key_val = (*(uint64_t *)key);
 
-	for (i = 0; i <= kvcbt->lpc_max; i++) {
-		r = dm_btree_lookup(&(kvcbt->info), kvcbt->root, &key_val,
+	for (i = 0; i <= kvxremap->lpc_max; i++) {
+		r = dm_btree_lookup(&(kvxremap->info), kvxremap->root, &key_val,
 		entry);
 		if (r == -ENODATA ||
-			is_deleted_entry(entry, kvcbt->entry_size)) {
+			is_deleted_x_entry(entry, kvxremap->entry_size)) {
 			memcpy(entry, key, ksize);
 			memcpy(entry + ksize, value, vsize);
 			__dm_bless_for_disk(&key_val);
-			r = dm_btree_insert(&(kvcbt->info), kvcbt->root,
-			&key_val, entry, &(kvcbt->root));
+			r = dm_btree_insert(&(kvxremap->info), kvxremap->root,
+			&key_val, entry, &(kvxremap->root));
 			kfree(entry);
-			if (i > kvcbt->lpc_cur) {
+			if (i > kvxremap->lpc_cur) {
 				/*
 				 * TODO: Need to put locks around it since
 				 * multiple threads might read/write this
 				 * variable.
 				 */
 				DMINFO("Changing linear probing to %d", i);
-				kvcbt->lpc_cur = i;
+				kvxremap->lpc_cur = i;
 			}
 			return 0;
 		} else if (r >= 0) {
@@ -948,26 +1048,26 @@ static int kvs_insert_sparse_cowbtree(struct kvstore *kvs, void *key,
 		}
 	}
 	DMINFO("Linear probing hard limit hit for insert hence"
-	"changing current max to hard limit :%d", kvcbt->lpc_max);
+	"changing current max to hard limit :%d", kvxremap->lpc_max);
 	/* XXX: Need to hold lock on variable */
-	kvcbt->lpc_cur = kvcbt->lpc_max;
+	kvxremap->lpc_cur = kvxremap->lpc_max;
 	kfree(entry);
 	return -ENOSPC;
 
 }
 
-static int kvs_iterate_sparse_cowbtree(struct kvstore *kvs,
+static int kvs_iterate_sparse_xremap(struct kvstore *kvs,
 				       int (*fn)(void *key, int32_t ksize,
 						 void *value, s32 vsize,
 						 void *data),
 					void *dc)
 {
-	struct kvstore_cbt_sparse *kvcbt = NULL;
+	struct kvstore_xremap_sparse *kvxremap = NULL;
 	char *entry, *key, *value;
 	int r;
 	dm_block_t lowest, highest;
 
-	kvcbt = container_of(kvs, struct kvstore_cbt_sparse, ckvs);
+	kvxremap = container_of(kvs, struct kvstore_xremap_sparse, ckvs);
 
 	entry = kmalloc(kvs->ksize + kvs->vsize, GFP_NOIO);
 	if (!entry)
@@ -982,24 +1082,24 @@ static int kvs_iterate_sparse_cowbtree(struct kvstore *kvs,
 		goto out;
 
 	/* Get the lowest and highest keys in the key value store */
-	r = dm_btree_find_lowest_key(&(kvcbt->info), kvcbt->root, &lowest);
+	r = dm_btree_find_lowest_key(&(kvxremap->info), kvxremap->root, &lowest);
 	if (r <= 0)
 		goto out;
 
-	r = dm_btree_find_highest_key(&(kvcbt->info), kvcbt->root, &highest);
+	r = dm_btree_find_highest_key(&(kvxremap->info), kvxremap->root, &highest);
 	if (r <= 0)
 		goto out;
 
 	while (lowest <= highest) {
 		/* Get the next entry entry in the kvs store */
-		r = dm_btree_lookup_next(&(kvcbt->info), kvcbt->root,
+		r = dm_btree_lookup_next(&(kvxremap->info), kvxremap->root,
 					 &lowest, &lowest, (void *)entry);
 
 		lowest++;
 		/*
 		 * Do not iterate over entries that are marked as deleted
 		 */
-		if (r || is_deleted_entry(entry, kvs->ksize + kvs->vsize))
+		if (r || is_deleted_x_entry(entry, kvs->ksize + kvs->vsize))
 			continue;
 
 		/* Split the key and value separately */
@@ -1021,12 +1121,12 @@ out:
 	return r;
 }
 
-static struct kvstore *kvs_create_sparse_cowbtree(struct metadata *md,
+static struct kvstore *kvs_create_sparse_xremap(struct metadata *md,
 						  u32 ksize, uint32_t vsize,
 						  u32 knummax,
 						  bool unformatted)
 {
-	struct kvstore_cbt_sparse *kvs;
+	struct kvstore_xremap_sparse *kvs;
 	int r;
 
 	if (!vsize || !ksize)
@@ -1055,10 +1155,10 @@ static struct kvstore *kvs_create_sparse_cowbtree(struct metadata *md,
 	kvs->lpc_cur = 0;
 
 	if (!unformatted) {
-		kvs->ckvs.kvs_insert = kvs_insert_sparse_cowbtree;
-		kvs->ckvs.kvs_lookup = kvs_lookup_sparse_cowbtree;
-		kvs->ckvs.kvs_delete = kvs_delete_sparse_cowbtree;
-		kvs->ckvs.kvs_iterate = kvs_iterate_sparse_cowbtree;
+		kvs->ckvs.kvs_insert = kvs_insert_sparse_xremap;
+		kvs->ckvs.kvs_lookup = kvs_lookup_sparse_xremap;
+		kvs->ckvs.kvs_delete = kvs_delete_sparse_xremap;
+		kvs->ckvs.kvs_iterate = kvs_iterate_sparse_xremap;
 
 		md->kvs_sparse = kvs;
 		__begin_transaction(md);
@@ -1070,12 +1170,12 @@ static struct kvstore *kvs_create_sparse_cowbtree(struct metadata *md,
 		}
 
 		/* I think this should be moved below the 4 lines below */
-		flush_meta_cowbtree(md);
+		flush_meta_xremap(md);
 
-		kvs->ckvs.kvs_insert = kvs_insert_sparse_cowbtree;
-		kvs->ckvs.kvs_lookup = kvs_lookup_sparse_cowbtree;
-		kvs->ckvs.kvs_delete = kvs_delete_sparse_cowbtree;
-		kvs->ckvs.kvs_iterate = kvs_iterate_sparse_cowbtree;
+		kvs->ckvs.kvs_insert = kvs_insert_sparse_xremap;
+		kvs->ckvs.kvs_lookup = kvs_lookup_sparse_xremap;
+		kvs->ckvs.kvs_delete = kvs_delete_sparse_xremap;
+		kvs->ckvs.kvs_iterate = kvs_iterate_sparse_xremap;
 
 		md->kvs_sparse = kvs;
 	}
@@ -1087,7 +1187,7 @@ badtree:
 	return (struct kvstore *)kvs;
 }
 
-int get_private_data_cowbtree(struct metadata *md, void **data, uint32_t size)
+int get_private_data_xremap(struct metadata *md, void **data, uint32_t size)
 {
 	if (size > sizeof(md->private_data))
 		return -1;
@@ -1096,7 +1196,7 @@ int get_private_data_cowbtree(struct metadata *md, void **data, uint32_t size)
 	return 0;
 }
 
-int set_private_data_cowbtree(struct metadata *md, void *data, uint32_t size)
+int set_private_data_xremap(struct metadata *md, void *data, uint32_t size)
 {
 	if (size > sizeof(md->private_data))
 		return -1;
@@ -1110,29 +1210,29 @@ struct dm_block_manager {
 	bool read_only:1;
 };
 
-void* get_bufio_client_cowbtree(struct metadata *md)
+void* get_bufio_client_xremap(struct metadata *md)
 {
 	struct dm_block_manager* bm = md->meta_bm;
 	return (void*)(bm->bufio);
 };
 
-struct metadata_ops metadata_ops_cowbtree = {
-	.init_meta = init_meta_cowbtree,
-	.exit_meta = exit_meta_cowbtree,
-	.kvs_create_linear = kvs_create_linear_cowbtree,
-	.kvs_create_sparse = kvs_create_sparse_cowbtree,
+struct metadata_ops metadata_ops_xremap = {
+	.init_meta = init_meta_xremap,
+	.exit_meta = exit_meta_xremap,
+	.kvs_create_linear = kvs_create_linear_xremap,
+	.kvs_create_sparse = kvs_create_sparse_xremap,
 
-	.alloc_data_block = alloc_data_block_cowbtree,
-	.inc_refcount = inc_refcount_cowbtree,
-	.dec_refcount = dec_refcount_cowbtree,
-	.get_refcount = get_refcount_cowbtree,
-	.set_refcount = NULL,
+	.alloc_data_block = alloc_data_block_xremap,
+	.inc_refcount = inc_refcount_xremap,
+	.dec_refcount = dec_refcount_xremap,
+	.get_refcount = get_refcount_xremap,
+	.set_refcount = set_refcount_xremap,
 
-	.flush_meta = flush_meta_cowbtree,
+	.flush_meta = flush_meta_xremap,
 
 	.flush_bufio_cache = NULL,
-	.get_bufio_client = get_bufio_client_cowbtree,
-	.get_private_data = get_private_data_cowbtree,
-	.set_private_data = set_private_data_cowbtree,
+	.get_bufio_client = get_bufio_client_xremap,
+	.get_private_data = get_private_data_xremap,
+	.set_private_data = set_private_data_xremap,
 
 };
