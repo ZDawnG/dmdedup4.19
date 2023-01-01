@@ -202,7 +202,7 @@ static int handle_read_xremap(struct dedup_config *dc, struct bio *bio)
 	tv.type = (r & 0x80000000) != 0;
 	tv.ver = (r & 0x7fffffff);
 	t = calculate_tarSSD(lbn);
-	DMINFO("     [ENODATA=%d][lbn=%llu][t_v=%x][type=%d][ver=%d]", r==0, lbn, r, tv.type, tv.ver);
+	//DMINFO("     [ENODATA=%d][lbn=%llu][t_v=%x][type=%d][ver=%d]", r==0, lbn, r, tv.type, tv.ver);
 
 	if (tv.type == 0 && tv.ver == 0) {
 		/* unable to find the entry in LBN->PBN store */
@@ -212,7 +212,7 @@ static int handle_read_xremap(struct dedup_config *dc, struct bio *bio)
 		lbn = remap_tarSSD(lbn, t, tv.ver);
 		bio->bi_opf = (bio->bi_opf & (~REQ_OP_MASK)) | REQ_OP_REMOTEREAD | REQ_NOMERGE;
 		bio->bi_write_hint = t;
-		DMINFO("     [t=%d][v=%d][lbn=%llu][op=%x]", t, tv.ver, lbn, bio->bi_opf);
+		//DMINFO("     [t=%d][v=%d][lbn=%llu][op=%x]", t, tv.ver, lbn, bio->bi_opf);
 		do_io(dc, clone, lbn);
 	} else {
 		do_io(dc, clone, lbn);
@@ -243,7 +243,7 @@ static int handle_read(struct dedup_config *dc, struct bio *bio)
 	/* get the pbn in LBN->PBN store for incoming lbn */
 	r = dc->kvs_lbn_pbn->kvs_lookup(dc->kvs_lbn_pbn, (void *)&lbn,
 			sizeof(lbn), (void *)&lbnpbn_value, &vsize);
-	DMINFO("     [ENODATA=%d][lbn=%llu][pbn=%llu]", r==-ENODATA, lbn, lbnpbn_value.pbn);
+	//DMINFO("     [ENODATA=%d][lbn=%llu][pbn=%llu]", r==-ENODATA, lbn, lbnpbn_value.pbn);
 
 	if (r == -ENODATA) {
 		/* unable to find the entry in LBN->PBN store */
@@ -1043,14 +1043,14 @@ static void process_bio(struct dedup_config *dc, struct bio *bio)
 		return;
 	}
 	if (bio_op(bio) == REQ_OP_DISCARD) {
-		DMINFO("DISCA:[bi_sector=0x%llx][bi_size=%u][bi_vcnt=%hu]", (unsigned long long)bio->bi_iter.bi_sector, bio->bi_iter.bi_size, bio->bi_vcnt);
+		//DMINFO("DISCA:[bi_sector=0x%llx][bi_size=%u][bi_vcnt=%hu]", (unsigned long long)bio->bi_iter.bi_sector, bio->bi_iter.bi_size, bio->bi_vcnt);
 		r = handle_discard(dc, bio);
 		return;
 	}
 
 	switch (bio_data_dir(bio)) {
 	case READ:
-		DMINFO("READ :[bi_sector=0x%llx][bi_size=%u][bi_vcnt=%hu][blk_name=%s]", (unsigned long long)bio->bi_iter.bi_sector, bio->bi_iter.bi_size, bio->bi_vcnt, bio->bi_disk->disk_name);
+		//DMINFO("READ :[bi_sector=0x%llx][bi_size=%u][bi_vcnt=%hu][blk_name=%s]", (unsigned long long)bio->bi_iter.bi_sector, bio->bi_iter.bi_size, bio->bi_vcnt, bio->bi_disk->disk_name);
 		//for (i = 0; i < bio->bi_vcnt; ++i)
 		//    DMINFO("[bv_page=0x%p][bv_len=%u][bv_offset=%u]", bio->bi_io_vec[i].bv_page, bio->bi_io_vec[i].bv_len, bio->bi_io_vec[i].bv_offset);
 		//DMINFO("\n");
@@ -1061,7 +1061,7 @@ static void process_bio(struct dedup_config *dc, struct bio *bio)
 			r = handle_read(dc, bio);
 		break;
 	case WRITE:
-		DMINFO("WRITE:[bi_sector=0x%llx][bi_size=%u][bi_vcnt=%hu]", (unsigned long long)bio->bi_iter.bi_sector, bio->bi_iter.bi_size, bio->bi_vcnt);
+		//DMINFO("WRITE:[bi_sector=0x%llx][bi_size=%u][bi_vcnt=%hu]", (unsigned long long)bio->bi_iter.bi_sector, bio->bi_iter.bi_size, bio->bi_vcnt);
 		//for (i = 0; i < bio->bi_vcnt; ++i)
 		//    DMINFO("[bv_page=0x%p][bv_len=%u][bv_offset=%u]", bio->bi_io_vec[i].bv_page, bio->bi_io_vec[i].bv_len, bio->bi_io_vec[i].bv_offset);
 		//DMINFO("\n");
@@ -1330,12 +1330,12 @@ static int parse_dedup_args(struct dedup_args *da, int argc,
 	struct dm_arg_set as;
 	int r;
 
-	if (argc < 7) {
+	if (argc < 8) {
 		*err = "Insufficient args";
 		return -EINVAL;
 	}
 
-	if (argc > 7) {
+	if (argc > 8) {
 		*err = "Too many args";
 		return -EINVAL;
 	}
@@ -1868,7 +1868,7 @@ static int issue_discard(struct dedup_config *dc, u64 lpn, int id)
 	id2 = id;
 
 	BUG_ON(!dc);
-	DMINFO("[LBN1=%lx][ID1=%d][ID2=%d]", dev_start, id1, id2);
+	//DMINFO("[LBN1=%lx][ID1=%d][ID2=%d]", dev_start, id1, id2);
 	err = blkdev_issue_discard(dc->data_dev->bdev, dev_start,
 			dev_end, GFP_NOIO, 0, id1, id2);
 	if (err) {
@@ -1888,7 +1888,7 @@ static int issue_begin_end(struct dedup_config *dc, u64 lpn, int id)
 	id2 = id;
 
 	BUG_ON(!dc);
-	DMINFO("[LBN1=%lx][ID1=%d][ID2=%d]", dev_start, id1, id2);
+	//DMINFO("[LBN1=%lx][ID1=%d][ID2=%d]", dev_start, id1, id2);
 	err = blkdev_issue_discard(dc->data_dev->bdev, dev_start,
 			dev_end, GFP_NOIO, 0, id1, id2);
 	if (err) {
@@ -1915,7 +1915,7 @@ static int issue_remap(struct dedup_config *dc, u64 lpn1, u64 lpn2, int last)
 
 	BUG_ON(!dc);
 
-	DMINFO("[LBN1=%lx][LBN2=%lx][ID1=%d][ID2=%d][ID3=%d]", dev_start, dev_s2, id1, id2, last);
+	//DMINFO("[LBN1=%lx][LBN2=%lx][ID1=%d][ID2=%d][ID3=%d]", dev_start, dev_s2, id1, id2, last);
 	
 	err = blkdev_issue_remap(dc->data_dev->bdev, dev_start, dev_s2, id1, id2, last,
 		dev_end, GFP_NOIO, 0);
