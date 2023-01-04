@@ -122,6 +122,16 @@ struct dm_buffer {
 #endif
 };
 
+static inline unsigned long read_tsc(void) {
+    unsigned long var;
+    unsigned int hi, lo;
+
+    asm volatile ("rdtsc" : "=a" (lo), "=d" (hi));
+    var = ((unsigned long long int) hi << 32) | lo;
+    
+    return var;
+}
+
 static int calculate_tarSSD(u64 lpn) {
 	sector_t align_size = 4, tmp = 0;
 	tmp = sector_div(lpn, align_size);
@@ -933,12 +943,23 @@ static int handle_write(struct dedup_config *dc, struct bio *bio)
 	}
 	
 	dc->writes_after_flush++;
-	if ((dc->flushrq && dc->writes_after_flush >= dc->flushrq) ||
+	if ((dc->flushrq > 0 && dc->writes_after_flush >= dc->flushrq) ||
 	    (bio->bi_opf & (REQ_PREFLUSH | REQ_FUA))) {
 		r = dc->mdops->flush_meta(dc->bmd);
 		if (r < 0)
 			return r;
 		dc->writes_after_flush = 0;
+	} else if(dc->flushrq < 0) {
+		int flushrq = - dc->flushrq;
+		unsigned long x, t = read_tsc();
+		x = (t - dc->time_last_flush) / 1900000;
+		if(x >= flushrq) {
+			r = dc->mdops->flush_meta(dc->bmd);
+			if (r < 0)
+				return r;
+			dc->writes_after_flush = 0;
+			dc->time_last_flush = t;
+		}
 	}
 
 	return 0;
@@ -1156,7 +1177,7 @@ struct dedup_args {
 	enum backend backend;
 	char backend_str[MAX_BACKEND_NAME_LEN];
 
-	u32 flushrq;
+	int flushrq;
 
 	bool corruption_flag;
 };
@@ -1288,7 +1309,7 @@ static int parse_backend(struct dedup_args *da, struct dm_arg_set *as,
 static int parse_flushrq(struct dedup_args *da, struct dm_arg_set *as,
 			 char **err)
 {
-	if (kstrtou32(dm_shift_arg(as), 10, &da->flushrq)) {
+	if (kstrtoint(dm_shift_arg(as), 10, &da->flushrq)) {
 		*err = "Invalid flushrq value";
 		return -EINVAL;
 	}
@@ -1606,6 +1627,7 @@ static int dm_dedup_ctr(struct dm_target *ti, unsigned int argc, char **argv)
 
 	dc->flushrq = da.flushrq;
 	dc->writes_after_flush = 0;
+	dc->time_last_flush = read_tsc();
 
 	r = dm_set_target_max_io_len(ti, dc->sectors_per_block);
 	if (r)
@@ -1737,7 +1759,7 @@ static void dm_dedup_status(struct dm_target *ti, status_type_t status_type,
 			dc->reads_on_writes, dc->overwrites, dc->newwrites, dc->gc_counter); */
 		break;
 	case STATUSTYPE_TABLE:
-		DMEMIT("%s %s %u %s %s %u",
+		DMEMIT("%s %s %u %s %s %d",
 		       dc->metadata_dev->name, dc->data_dev->name, dc->block_size,
 			dc->crypto_alg, dc->backend_str, dc->flushrq);
 	}

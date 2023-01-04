@@ -110,8 +110,9 @@ struct dedup_config {
 	char crypto_alg[CRYPTO_ALG_NAME_LEN];
 	int crypto_key_size;
 
-	u32 flushrq;		/* after how many writes call flush */
+	int flushrq;		/* after how many writes call flush */
 	u64 writes_after_flush;	/* # of writes after the last flush */
+	unsigned long time_last_flush; /* the time of last call flush */
 
 	mempool_t *dedup_work_pool;	/* Dedup work pool */
 	mempool_t *check_work_pool;	/* Corruption check work pool */
