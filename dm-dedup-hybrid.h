@@ -11,8 +11,8 @@
  * This file is released under the GPL.
  */
 
-#ifndef COWBTREE_BACKEND_H
-#define COWBTREE_BACKEND_H
+#ifndef HYBRID_BACKEND_H
+#define HYBRID_BACKEND_H
 
 #include <linux/module.h>
 #include <linux/init.h>
@@ -37,11 +37,11 @@
 
 #define MAX_LINEAR_PROBING_LIMIT 5
 
-extern struct metadata_ops metadata_ops_cowbtree;
+extern struct metadata_ops metadata_ops_hybrid;
 
-struct init_param_cowbtree {
+struct init_param_hybrid {
 	struct block_device *metadata_bdev;
 	u64 blocks;
 };
 
-#endif /* COWBTREE_BACKEND_H */
+#endif /* HYBRID_BACKEND_H */

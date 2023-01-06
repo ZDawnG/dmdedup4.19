@@ -25,6 +25,7 @@
 #include "dm-dedup-ram.h"
 #include "dm-dedup-cbt.h"
 #include "dm-dedup-xremap.h"
+#include "dm-dedup-hybrid.h"
 #include "dm-dedup-kvstore.h"
 #include "dm-dedup-check.h"
 
@@ -53,7 +54,8 @@ struct dedup_work {
 enum backend {
 	BKND_INRAM,
 	BKND_COWBTREE,
-	BKND_XREMAP
+	BKND_XREMAP,
+	BKND_HYBRID
 };
 
 #define LIST_SIZE	2
@@ -1290,6 +1292,8 @@ static int parse_backend(struct dedup_args *da, struct dm_arg_set *as,
 		da->backend = BKND_COWBTREE;
 	} else if (!strcmp(backend, "xremap")) {
 		da->backend = BKND_XREMAP;
+	} else if (!strcmp(backend, "hybrid")) {
+		da->backend = BKND_HYBRID;
 	} else {
 		*err = "Unsupported metadata backend";
 		return -EINVAL;
@@ -1423,6 +1427,7 @@ static int dm_dedup_ctr(struct dm_target *ti, unsigned int argc, char **argv)
 	struct init_param_inram iparam_inram;
 	struct init_param_cowbtree iparam_cowbtree;
 	struct init_param_xremap iparam_xremap;
+	struct init_param_hybrid iparam_hybrid;
 	void *iparam = NULL;
 	struct metadata *md = NULL;
 
@@ -1521,6 +1526,13 @@ static int dm_dedup_ctr(struct dm_target *ti, unsigned int argc, char **argv)
 		iparam_xremap.blocks = dc->pblocks;
 		iparam_xremap.metadata_bdev = da.meta_dev->bdev;
 		iparam = &iparam_xremap;
+		break;
+	case BKND_HYBRID:
+		dc->mdops = &metadata_ops_hybrid;
+		iparam_hybrid.blocks = dc->pblocks;
+		iparam_hybrid.metadata_bdev = da.meta_dev->bdev;
+		iparam = &iparam_hybrid;
+		break;
 	}
 
 	strcpy(dc->backend_str, da.backend_str);

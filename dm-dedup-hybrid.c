@@ -22,7 +22,7 @@
 #include "persistent-data/dm-block-manager.h"
 #include "persistent-data/dm-transaction-manager.h"
 
-#include "dm-dedup-cbt.h"
+#include "dm-dedup-hybrid.h"
 #include "dm-dedup-backend.h"
 #include "dm-dedup-kvstore.h"
 
@@ -39,6 +39,11 @@
 #define DM_DEDUP_VERSION 1
 #define SUPERBLOCK_CSUM_XOR 189575
 struct metadata {
+	/* Space Map */
+	u32 *smap;
+	u64 smax;
+	u64 allocptr;
+
 	struct dm_block_manager *meta_bm;
 	struct dm_transaction_manager *tm;
 	struct dm_space_map *data_sm;
@@ -47,20 +52,20 @@ struct metadata {
 	/*
 	 * XXX: Currently we support only one linear and one sparse KVS.
 	 */
-	struct kvstore_cbt_linear *kvs_linear;
-	struct kvstore_cbt_sparse *kvs_sparse;
+	struct kvstore_hybrid_linear *kvs_linear;
+	struct kvstore_hybrid_sparse *kvs_sparse;
 
 	u8 private_data[PRIVATE_DATA_SIZE];
 
 };
 
-struct kvstore_cbt_linear {
+struct kvstore_hybrid_linear {
 	struct kvstore ckvs;
 	u32 kmax;
 	char *store;
 };
 
-struct kvstore_cbt_sparse {
+struct kvstore_hybrid_sparse {
 	struct kvstore ckvs;
 	u32 entry_size;
 	struct dm_btree_info info;
@@ -387,6 +392,7 @@ out:
 static struct metadata *init_meta_hybrid(void *input_param, bool *unformatted)
 {
 	int ret;
+	u64 smap_size, tmp;
 	struct metadata *md;
 	struct dm_block_manager *meta_bm;
 	struct dm_space_map *meta_sm;
@@ -396,6 +402,8 @@ static struct metadata *init_meta_hybrid(void *input_param, bool *unformatted)
 				(struct init_param_hybrid *)input_param;
 
 	DMINFO("Initializing hybrid backend");
+
+	*unformatted = true;
 
 	md = kzalloc(sizeof(*md), GFP_NOIO);
 	if (!md)
@@ -492,6 +500,23 @@ begin_trans:
 		goto badwritesuper;
 	}
 
+	smap_size = p->blocks * sizeof(uint32_t);
+
+	md->smap = vmalloc(smap_size);
+	if (!md->smap) {
+		kfree(md);
+		return ERR_PTR(-ENOMEM);
+	}
+
+	tmp = smap_size;
+	(void)do_div(tmp, (1024 * 1024));
+	DMINFO("Space allocated for pbn reference count map: %llu.%06llu MB\n",
+	       tmp, smap_size - (tmp * (1024 * 1024)));
+
+	memset(md->smap, 0, smap_size);
+
+	md->smax = p->blocks;
+	md->allocptr = 0;
 	md->kvs_linear = NULL;
 	md->kvs_sparse = NULL;
 
@@ -524,6 +549,9 @@ static void exit_meta_hybrid(struct metadata *md)
 	dm_sm_destroy(md->meta_sm);
 	dm_block_manager_destroy(md->meta_bm);
 
+	if (md->smap)
+		vfree(md->smap);
+	
 	if (md->kvs_linear) {
 		if (md->kvs_linear->store)
 			vfree(md->kvs_linear->store);
@@ -552,31 +580,77 @@ static int flush_meta_hybrid(struct metadata *md)
  *		Space Management Functions		*
  ********************************************************/
 
+static uint64_t next_head(u64 current_head, u64 smax)
+{
+	current_head += 1;
+	return dm_sector_div64(current_head, smax);
+}
+
 static int alloc_data_block_hybrid(struct metadata *md, uint64_t *blockn)
 {
-	return dm_sm_new_block(md->data_sm, blockn);
+	u64 head, tail;
+
+	head = md->allocptr;
+	tail = md->allocptr;
+
+	do {
+		if (!md->smap[head]) {
+			md->smap[head] = 1;
+			*blockn = head;
+			md->allocptr = next_head(head, md->smax);
+			return 0;
+		}
+
+		head = next_head(head, md->smax);
+
+	} while (head != tail);
+
+	return -ENOSPC;
+	//return dm_sm_new_block(md->data_sm, blockn);
 }
 
 static int inc_refcount_hybrid(struct metadata *md, uint64_t blockn)
 {
-	return dm_sm_inc_block(md->data_sm, blockn);
+	if (blockn >= md->smax)
+		return -ERANGE;
+
+	if (md->smap[blockn] != UINT32_MAX)
+		md->smap[blockn]++;
+	else
+		return -E2BIG;
+
+	return 0;
+	//return dm_sm_inc_block(md->data_sm, blockn);
 }
 
 static int dec_refcount_hybrid(struct metadata *md, uint64_t blockn)
 {
-	return dm_sm_dec_block(md->data_sm, blockn);
+	if (blockn >= md->smax)
+		return -ERANGE;
+
+	if (md->smap[blockn])
+		md->smap[blockn]--;
+	else
+		return -EFAULT;
+
+	return 0;
+	//return dm_sm_dec_block(md->data_sm, blockn);
 }
 
 static int get_refcount_hybrid(struct metadata *md, uint64_t blockn)
 {
-	u32 refcount;
-	int r;
+	if (blockn >= md->smax)
+		return -ERANGE;
 
-	r = dm_sm_get_count(md->data_sm, blockn, &refcount);
-	if (r < 0)
-		return r;
+	return md->smap[blockn];
+	// u32 refcount;
+	// int r;
 
-	return (int)refcount;
+	// r = dm_sm_get_count(md->data_sm, blockn, &refcount);
+	// if (r < 0)
+	// 	return r;
+
+	// return (int)refcount;
 }
 
 /*
@@ -584,7 +658,7 @@ static int get_refcount_hybrid(struct metadata *md, uint64_t blockn)
  * (tombstone) or not.  We check if every byte in the
  * entry holds the value of DELETED_ENTRY.
  */
-bool is_deleted_entry(const char *ptr, uint32_t length)
+bool is_deleted_entry_hybrid(const char *ptr, uint32_t length)
 {
 	int i = 0;
 
@@ -593,7 +667,7 @@ bool is_deleted_entry(const char *ptr, uint32_t length)
 
 	return i == length;
 }
-bool is_empty_entry(unsigned char *ptr, int length)
+bool is_empty_entry_hybrid(unsigned char *ptr, int length)
 {
 	int i = 0;
 
@@ -616,21 +690,21 @@ static int kvs_delete_linear_hybrid(struct kvstore *kvs,
 {
 	u64 idx;
 	char *ptr;
-	struct kvstore_cbt_linear *kvcbt = NULL;
+	struct kvstore_hybrid_linear *kvhybrid = NULL;
 
-	kvcbt = container_of(kvs, struct kvstore_cbt_linear, ckvs);
+	kvhybrid = container_of(kvs, struct kvstore_hybrid_linear, ckvs);
 
 	if (ksize != kvs->ksize)
 		return -EINVAL;
 
 	idx = *((uint64_t *)key);
 
-	if (idx > kvcbt->kmax)
+	if (idx > kvhybrid->kmax)
 		return -ERANGE;
 
-	ptr = kvcbt->store + kvs->vsize * idx;
+	ptr = kvhybrid->store + kvs->vsize * idx;
 
-	if (is_empty_entry(ptr, kvs->vsize))
+	if (is_empty_entry_hybrid(ptr, kvs->vsize))
 		return -ENODEV;
 
 	memset(ptr, EMPTY_ENTRY, kvs->vsize);
@@ -648,21 +722,21 @@ static int kvs_lookup_linear_hybrid(struct kvstore *kvs, void *key,
 	u64 idx;
 	char *ptr;
 	int r = -ENODATA;
-	struct kvstore_cbt_linear *kvcbt = NULL;
+	struct kvstore_hybrid_linear *kvhybrid = NULL;
 
-	kvcbt = container_of(kvs, struct kvstore_cbt_linear, ckvs);
+	kvhybrid = container_of(kvs, struct kvstore_hybrid_linear, ckvs);
 
 	if (ksize != kvs->ksize)
 		return -EINVAL;
 
 	idx = *((uint64_t *)key);
 
-	if (idx > kvcbt->kmax)
+	if (idx > kvhybrid->kmax)
 		return -ERANGE;
 
-	ptr = kvcbt->store + kvs->vsize * idx;
+	ptr = kvhybrid->store + kvs->vsize * idx;
 
-	if (is_empty_entry(ptr, kvs->vsize))
+	if (is_empty_entry_hybrid(ptr, kvs->vsize))
 		return r;
 
 	memcpy(value, ptr, kvs->vsize);
@@ -682,9 +756,9 @@ static int kvs_insert_linear_hybrid(struct kvstore *kvs, void *key,
 {
 	u64 idx;
 	char *ptr;
-	struct kvstore_cbt_linear *kvcbt = NULL;
+	struct kvstore_hybrid_linear *kvhybrid = NULL;
 
-	kvcbt = container_of(kvs, struct kvstore_cbt_linear, ckvs);
+	kvhybrid = container_of(kvs, struct kvstore_hybrid_linear, ckvs);
 
 	if (ksize != kvs->ksize)
 		return -EINVAL;
@@ -694,10 +768,10 @@ static int kvs_insert_linear_hybrid(struct kvstore *kvs, void *key,
 
 	idx = *((uint64_t *)key);
 
-	if (idx > kvcbt->kmax)
+	if (idx > kvhybrid->kmax)
 		return -ERANGE;
 
-	ptr = kvcbt->store + kvs->vsize * idx;
+	ptr = kvhybrid->store + kvs->vsize * idx;
 
 	memcpy(ptr, value, kvs->vsize);
 
@@ -709,7 +783,7 @@ static struct kvstore *kvs_create_linear_hybrid(struct metadata *md,
 						  u32 kmax,
 						  bool unformatted)
 {
-	struct kvstore_cbt_linear *kvs;
+	struct kvstore_hybrid_linear *kvs;
 	u64 kvstore_size, tmp;
 
 	if (!vsize || !ksize || !kmax)
@@ -763,7 +837,7 @@ static struct kvstore *kvs_create_linear_hybrid(struct metadata *md,
  * Returns -ERR code in failure.
  * Returns 0 on success.
  */
-static int kvs_delete_entry(struct kvstore_cbt_sparse *kvcbt,
+static int kvs_delete_entry(struct kvstore_hybrid_sparse *kvhybrid,
 			    char *cur_entry, char *next_entry,
 			    u64 cur_key_val, int ret_next)
 {
@@ -772,11 +846,11 @@ static int kvs_delete_entry(struct kvstore_cbt_sparse *kvcbt,
 	if (ret_next == 0 &&
 	    memcmp(cur_entry, next_entry, sizeof(cur_key_val)) == 0) {
 		/* There is a next key and it is a linearly probed one. */
-		memset(cur_entry, DELETED_ENTRY, kvcbt->entry_size);
+		memset(cur_entry, DELETED_ENTRY, kvhybrid->entry_size);
 			       __dm_bless_for_disk(&cur_key_val);
 
-		r = dm_btree_insert(&(kvcbt->info), kvcbt->root,
-				    &cur_key_val, cur_entry, &(kvcbt->root));
+		r = dm_btree_insert(&(kvhybrid->info), kvhybrid->root,
+				    &cur_key_val, cur_entry, &(kvhybrid->root));
 		DMWARN("Marked as tombstone for keyval = %lld", cur_key_val);
 	} else {
 		/*
@@ -784,10 +858,10 @@ static int kvs_delete_entry(struct kvstore_cbt_sparse *kvcbt,
 		 * OR
 		 * There is no next key.
 		 */
-		r = dm_btree_remove(&(kvcbt->info),
-				    kvcbt->root,
+		r = dm_btree_remove(&(kvhybrid->info),
+				    kvhybrid->root,
 				    &cur_key_val,
-				    &(kvcbt->root));
+				    &(kvhybrid->root));
 		DMWARN("Performed actual deletion for keyval = %lld",
 		       cur_key_val);
 	}
@@ -800,20 +874,20 @@ static int kvs_delete_sparse_hybrid(struct kvstore *kvs,
 	char *cur_entry, *next_entry;
 	u64 key_val, cur_key_val;
 	int r = 0;
-	struct kvstore_cbt_sparse *kvcbt = NULL;
+	struct kvstore_hybrid_sparse *kvhybrid = NULL;
 
-	kvcbt = container_of(kvs, struct kvstore_cbt_sparse, ckvs);
+	kvhybrid = container_of(kvs, struct kvstore_hybrid_sparse, ckvs);
 
 	if (ksize != kvs->ksize)
 		return -EINVAL;
 
-	cur_entry = kmalloc(kvcbt->entry_size, GFP_NOIO);
+	cur_entry = kmalloc(kvhybrid->entry_size, GFP_NOIO);
 	if (!cur_entry)
 		return -ENOMEM;
 
 	key_val = (*(uint64_t *)key);
 
-	r = dm_btree_lookup(&(kvcbt->info), kvcbt->root, &key_val, cur_entry);
+	r = dm_btree_lookup(&(kvhybrid->info), kvhybrid->root, &key_val, cur_entry);
 
 	if (r == -ENODATA) {
 		return -ENODEV;
@@ -822,17 +896,17 @@ static int kvs_delete_sparse_hybrid(struct kvstore *kvs,
 		cur_key_val = key_val;
 		key_val++;
 
-		next_entry = kmalloc(kvcbt->entry_size, GFP_NOIO);
+		next_entry = kmalloc(kvhybrid->entry_size, GFP_NOIO);
 		if (!next_entry)
 			return -ENOMEM;
 
-		r = dm_btree_lookup(&(kvcbt->info),
-				     kvcbt->root,
+		r = dm_btree_lookup(&(kvhybrid->info),
+				     kvhybrid->root,
 				     &key_val, next_entry);
 
 		if (!memcmp(cur_entry, key, ksize)) {
 			/* Key found. */
-			r = kvs_delete_entry(kvcbt, cur_entry, next_entry,
+			r = kvs_delete_entry(kvhybrid, cur_entry, next_entry,
 					     cur_key_val, r);
 			DMWARN("Deleted key successfully\n");
 			goto out;
@@ -861,14 +935,14 @@ static int kvs_lookup_sparse_hybrid(struct kvstore *kvs, void *key,
 	char *entry;
 	u64 key_val;
 	int i, r = -ENODATA;
-	struct kvstore_cbt_sparse *kvcbt = NULL;
+	struct kvstore_hybrid_sparse *kvhybrid = NULL;
 
-	kvcbt = container_of(kvs, struct kvstore_cbt_sparse, ckvs);
+	kvhybrid = container_of(kvs, struct kvstore_hybrid_sparse, ckvs);
 
 	if (ksize != kvs->ksize)
 		return -EINVAL;
 
-	entry = kmalloc(kvcbt->entry_size, GFP_NOIO);
+	entry = kmalloc(kvhybrid->entry_size, GFP_NOIO);
 	if (!entry)
 		return -ENOMEM;
 
@@ -881,8 +955,8 @@ static int kvs_lookup_sparse_hybrid(struct kvstore *kvs, void *key,
 	 * XXX:Need to put lock around whole code since multiple threads
 	 * might be accessing this limit.
 	 */
-	for (i = 0; i <= kvcbt->lpc_cur; i++) {
-		r = dm_btree_lookup(&(kvcbt->info), kvcbt->root, &key_val,
+	for (i = 0; i <= kvhybrid->lpc_cur; i++) {
+		r = dm_btree_lookup(&(kvhybrid->info), kvhybrid->root, &key_val,
 		entry);
 		/* if entry not found in btree */
 		if (r == -ENODATA) {
@@ -921,9 +995,9 @@ static int kvs_insert_sparse_hybrid(struct kvstore *kvs, void *key,
 	char *entry;
 	u64 key_val;
 	int i, r;
-	struct kvstore_cbt_sparse *kvcbt = NULL;
+	struct kvstore_hybrid_sparse *kvhybrid = NULL;
 
-	kvcbt = container_of(kvs, struct kvstore_cbt_sparse, ckvs);
+	kvhybrid = container_of(kvs, struct kvstore_hybrid_sparse, ckvs);
 
 	if (ksize != kvs->ksize)
 		return -EINVAL;
@@ -931,31 +1005,31 @@ static int kvs_insert_sparse_hybrid(struct kvstore *kvs, void *key,
 	if (vsize != kvs->vsize)
 		return -EINVAL;
 
-	entry = kmalloc(kvcbt->entry_size, GFP_NOIO);
+	entry = kmalloc(kvhybrid->entry_size, GFP_NOIO);
 	if (!entry)
 		return -ENOMEM;
 
 	key_val = (*(uint64_t *)key);
 
-	for (i = 0; i <= kvcbt->lpc_max; i++) {
-		r = dm_btree_lookup(&(kvcbt->info), kvcbt->root, &key_val,
+	for (i = 0; i <= kvhybrid->lpc_max; i++) {
+		r = dm_btree_lookup(&(kvhybrid->info), kvhybrid->root, &key_val,
 		entry);
 		if (r == -ENODATA ||
-			is_deleted_entry(entry, kvcbt->entry_size)) {
+			is_deleted_entry_hybrid(entry, kvhybrid->entry_size)) {
 			memcpy(entry, key, ksize);
 			memcpy(entry + ksize, value, vsize);
 			__dm_bless_for_disk(&key_val);
-			r = dm_btree_insert(&(kvcbt->info), kvcbt->root,
-			&key_val, entry, &(kvcbt->root));
+			r = dm_btree_insert(&(kvhybrid->info), kvhybrid->root,
+			&key_val, entry, &(kvhybrid->root));
 			kfree(entry);
-			if (i > kvcbt->lpc_cur) {
+			if (i > kvhybrid->lpc_cur) {
 				/*
 				 * TODO: Need to put locks around it since
 				 * multiple threads might read/write this
 				 * variable.
 				 */
 				DMINFO("Changing linear probing to %d", i);
-				kvcbt->lpc_cur = i;
+				kvhybrid->lpc_cur = i;
 			}
 			return 0;
 		} else if (r >= 0) {
@@ -967,9 +1041,9 @@ static int kvs_insert_sparse_hybrid(struct kvstore *kvs, void *key,
 		}
 	}
 	DMINFO("Linear probing hard limit hit for insert hence"
-	"changing current max to hard limit :%d", kvcbt->lpc_max);
+	"changing current max to hard limit :%d", kvhybrid->lpc_max);
 	/* XXX: Need to hold lock on variable */
-	kvcbt->lpc_cur = kvcbt->lpc_max;
+	kvhybrid->lpc_cur = kvhybrid->lpc_max;
 	kfree(entry);
 	return -ENOSPC;
 
@@ -981,12 +1055,12 @@ static int kvs_iterate_sparse_hybrid(struct kvstore *kvs,
 						 void *data),
 					void *dc)
 {
-	struct kvstore_cbt_sparse *kvcbt = NULL;
+	struct kvstore_hybrid_sparse *kvhybrid = NULL;
 	char *entry, *key, *value;
 	int r;
 	dm_block_t lowest, highest;
 
-	kvcbt = container_of(kvs, struct kvstore_cbt_sparse, ckvs);
+	kvhybrid = container_of(kvs, struct kvstore_hybrid_sparse, ckvs);
 
 	entry = kmalloc(kvs->ksize + kvs->vsize, GFP_NOIO);
 	if (!entry)
@@ -1001,24 +1075,24 @@ static int kvs_iterate_sparse_hybrid(struct kvstore *kvs,
 		goto out;
 
 	/* Get the lowest and highest keys in the key value store */
-	r = dm_btree_find_lowest_key(&(kvcbt->info), kvcbt->root, &lowest);
+	r = dm_btree_find_lowest_key(&(kvhybrid->info), kvhybrid->root, &lowest);
 	if (r <= 0)
 		goto out;
 
-	r = dm_btree_find_highest_key(&(kvcbt->info), kvcbt->root, &highest);
+	r = dm_btree_find_highest_key(&(kvhybrid->info), kvhybrid->root, &highest);
 	if (r <= 0)
 		goto out;
 
 	while (lowest <= highest) {
 		/* Get the next entry entry in the kvs store */
-		r = dm_btree_lookup_next(&(kvcbt->info), kvcbt->root,
+		r = dm_btree_lookup_next(&(kvhybrid->info), kvhybrid->root,
 					 &lowest, &lowest, (void *)entry);
 
 		lowest++;
 		/*
 		 * Do not iterate over entries that are marked as deleted
 		 */
-		if (r || is_deleted_entry(entry, kvs->ksize + kvs->vsize))
+		if (r || is_deleted_entry_hybrid(entry, kvs->ksize + kvs->vsize))
 			continue;
 
 		/* Split the key and value separately */
@@ -1045,7 +1119,7 @@ static struct kvstore *kvs_create_sparse_hybrid(struct metadata *md,
 						  u32 knummax,
 						  bool unformatted)
 {
-	struct kvstore_cbt_sparse *kvs;
+	struct kvstore_hybrid_sparse *kvs;
 	int r;
 
 	if (!vsize || !ksize)
