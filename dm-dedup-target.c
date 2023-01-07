@@ -1180,6 +1180,7 @@ struct dedup_args {
 	char backend_str[MAX_BACKEND_NAME_LEN];
 
 	int flushrq;
+	int gc_rate;
 
 	bool corruption_flag;
 };
@@ -1344,6 +1345,23 @@ static int parse_corruption_flag(struct dedup_args *da, struct dm_arg_set *as,
 }
 
 /*
+ * Checks for a valid gc rate.
+ *
+ * Returns -EINVAL in failure.
+ * Returns 0 on success.
+ */
+static int parse_gc_rate(struct dedup_args *da, struct dm_arg_set *as,
+			 char **err)
+{
+	if (kstrtoint(dm_shift_arg(as), 10, &da->gc_rate)) {
+		*err = "Invalid gc rate";
+		return -EINVAL;
+	}
+
+	return 0;
+}
+
+/*
  * Wrapper function for all parse functions.
  *
  * Returns -ERR code in failure.
@@ -1393,6 +1411,10 @@ static int parse_dedup_args(struct dedup_args *da, int argc,
 		return r;
 
 	r = parse_corruption_flag(da, &as, err);
+	if (r)
+		return r;
+
+	r = parse_gc_rate(da, &as, err);
 	if (r)
 		return r;
 
@@ -1558,13 +1580,13 @@ static int dm_dedup_ctr(struct dm_target *ti, unsigned int argc, char **argv)
 			dc->kvs_hash_pbn = dc->mdops->kvs_create_sparse(md, crypto_key_size,
 				sizeof(struct hash_pbn_value_x),
 				dc->pblocks, unformatted);
-			dc->gc_threhold = dc->pblocks * 2;
+			dc->gc_threhold = dc->pblocks * da.gc_rate / 100;
 			break;
 		default:
 			dc->kvs_hash_pbn = dc->mdops->kvs_create_sparse(md, crypto_key_size,
 				sizeof(struct hash_pbn_value),
 				dc->pblocks, unformatted);
-			dc->gc_threhold = dc->pblocks / 5;
+			dc->gc_threhold = dc->pblocks * da.gc_rate / 100;
 	}
 	if (IS_ERR(dc->kvs_hash_pbn)) {
 		ti->error = "failed to create sparse KVS";
