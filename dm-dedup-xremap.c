@@ -815,7 +815,7 @@ static struct kvstore *kvs_create_linear_xremap(struct metadata *md,
 
 	tmp = kvstore_size;
 	(void)do_div(tmp, (1024 * 1024));
-	DMINFO("Space allocated for linear key value store: %llu.%06llu MB\n",
+	DMINFO("Space allocated for linear key value store: %llu.%06llu MB",
 	       tmp, kvstore_size - (tmp * (1024 * 1024)));
 
 	memset(kvs->store, EMPTY_ENTRY, kvstore_size);
@@ -878,7 +878,7 @@ static int kvs_delete_entry(struct kvstore_xremap_sparse *kvxremap,
 static int kvs_delete_sparse_xremap(struct kvstore *kvs,
 				      void *key, int32_t ksize)
 {
-	char *cur_entry, *next_entry;
+	char *cur_entry, *next_entry = NULL;
 	u64 key_val, cur_key_val;
 	int r = 0;
 	struct kvstore_xremap_sparse *kvxremap = NULL;
@@ -915,7 +915,7 @@ static int kvs_delete_sparse_xremap(struct kvstore *kvs,
 			/* Key found. */
 			r = kvs_delete_entry(kvxremap, cur_entry, next_entry,
 					     cur_key_val, r);
-			DMWARN("Deleted key successfully\n");
+			DMWARN("Deleted key successfully");
 			goto out;
 		} else if (r == 0) {
 			/* Key not found but there is a next key. */
@@ -1063,8 +1063,8 @@ static int kvs_iterate_sparse_xremap(struct kvstore *kvs,
 					void *dc)
 {
 	struct kvstore_xremap_sparse *kvxremap = NULL;
-	char *entry, *key, *value;
-	int r;
+	char *entry, *key = NULL, *value = NULL;
+	int r = 0;
 	dm_block_t lowest, highest;
 
 	kvxremap = container_of(kvs, struct kvstore_xremap_sparse, ckvs);

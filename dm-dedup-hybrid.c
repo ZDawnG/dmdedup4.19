@@ -510,7 +510,7 @@ begin_trans:
 
 	tmp = smap_size;
 	(void)do_div(tmp, (1024 * 1024));
-	DMINFO("Space allocated for pbn reference count map: %llu.%06llu MB\n",
+	DMINFO("Space allocated for pbn reference count map: %llu.%06llu MB",
 	       tmp, smap_size - (tmp * (1024 * 1024)));
 
 	memset(md->smap, 0, smap_size);
@@ -871,7 +871,7 @@ static int kvs_delete_entry(struct kvstore_hybrid_sparse *kvhybrid,
 static int kvs_delete_sparse_hybrid(struct kvstore *kvs,
 				      void *key, int32_t ksize)
 {
-	char *cur_entry, *next_entry;
+	char *cur_entry, *next_entry = NULL;
 	u64 key_val, cur_key_val;
 	int r = 0;
 	struct kvstore_hybrid_sparse *kvhybrid = NULL;
@@ -908,7 +908,7 @@ static int kvs_delete_sparse_hybrid(struct kvstore *kvs,
 			/* Key found. */
 			r = kvs_delete_entry(kvhybrid, cur_entry, next_entry,
 					     cur_key_val, r);
-			DMWARN("Deleted key successfully\n");
+			DMWARN("Deleted key successfully");
 			goto out;
 		} else if (r == 0) {
 			/* Key not found but there is a next key. */
@@ -1056,8 +1056,8 @@ static int kvs_iterate_sparse_hybrid(struct kvstore *kvs,
 					void *dc)
 {
 	struct kvstore_hybrid_sparse *kvhybrid = NULL;
-	char *entry, *key, *value;
-	int r;
+	char *entry, *key = NULL, *value = NULL;
+	int r = 0;
 	dm_block_t lowest, highest;
 
 	kvhybrid = container_of(kvs, struct kvstore_hybrid_sparse, ckvs);

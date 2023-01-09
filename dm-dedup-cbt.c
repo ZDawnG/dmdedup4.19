@@ -778,7 +778,7 @@ static int kvs_delete_entry(struct kvstore_cbt_sparse *kvcbt,
 static int kvs_delete_sparse_cowbtree(struct kvstore *kvs,
 				      void *key, int32_t ksize)
 {
-	char *cur_entry, *next_entry;
+	char *cur_entry, *next_entry = NULL;
 	u64 key_val, cur_key_val;
 	int r = 0;
 	struct kvstore_cbt_sparse *kvcbt = NULL;
@@ -815,7 +815,7 @@ static int kvs_delete_sparse_cowbtree(struct kvstore *kvs,
 			/* Key found. */
 			r = kvs_delete_entry(kvcbt, cur_entry, next_entry,
 					     cur_key_val, r);
-			DMWARN("Deleted key successfully\n");
+			DMWARN("Deleted key successfully");
 			goto out;
 		} else if (r == 0) {
 			/* Key not found but there is a next key. */
@@ -963,8 +963,8 @@ static int kvs_iterate_sparse_cowbtree(struct kvstore *kvs,
 					void *dc)
 {
 	struct kvstore_cbt_sparse *kvcbt = NULL;
-	char *entry, *key, *value;
-	int r;
+	char *entry, *key = NULL, *value = NULL;
+	int r = 0;
 	dm_block_t lowest, highest;
 
 	kvcbt = container_of(kvs, struct kvstore_cbt_sparse, ckvs);

@@ -69,7 +69,7 @@ static struct metadata *init_meta_inram(void *init_param, bool *unformatted)
 
 	tmp = smap_size;
 	(void)do_div(tmp, (1024 * 1024));
-	DMINFO("Space allocated for pbn reference count map: %llu.%06llu MB\n",
+	DMINFO("Space allocated for pbn reference count map: %llu.%06llu MB",
 	       tmp, smap_size - (tmp * (1024 * 1024)));
 
 	memset(md->smap, 0, smap_size);
@@ -361,7 +361,7 @@ static struct kvstore *kvs_create_linear_inram(struct metadata *md,
 
 	tmp = kvstore_size;
 	(void)do_div(tmp, (1024 * 1024));
-	DMINFO("Space allocated for linear key value store: %llu.%06llu MB\n",
+	DMINFO("Space allocated for linear key value store: %llu.%06llu MB",
 	       tmp, kvstore_size - (tmp * (1024 * 1024)));
 
 	memset(kvs->store, EMPTY_ENTRY, kvstore_size);
@@ -567,7 +567,7 @@ static struct kvstore *kvs_create_sparse_inram(struct metadata *md,
 
 	tmp = kvstore_size;
 	(void)do_div(tmp, (1024 * 1024));
-	DMINFO("Space allocated for sparse key value store: %llu.%06llu MB\n",
+	DMINFO("Space allocated for sparse key value store: %llu.%06llu MB",
 	       tmp, kvstore_size - (tmp * (1024 * 1024)));
 
 	memset(kvs->store, EMPTY_ENTRY, kvstore_size);

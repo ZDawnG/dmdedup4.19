@@ -200,19 +200,17 @@ static void do_io(struct dedup_config *dc, struct bio *bio, uint64_t pbn)
 static int handle_read_xremap(struct dedup_config *dc, struct bio *bio)
 {
 	u64 lbn;
-	u32 vsize;
 	t_v tv;
-	struct check_io *io;
 	struct bio *clone;
-	int r, t, tmp;
+	int ref, t;
 	
 	clone = bio;
 	lbn = bio_lbn(dc, bio);
 
 	/* get the pbn in LBN->PBN store for incoming lbn */
-	r = dc->mdops->get_refcount(dc->bmd, lbn);
-	tv.type = (r & 0x80000000) != 0;
-	tv.ver = (r & 0x7fffffff);
+	ref = dc->mdops->get_refcount(dc->bmd, lbn);
+	tv.type = (ref & 0x80000000) != 0;
+	tv.ver = (ref & 0x7fffffff);
 	t = calculate_tarSSD(lbn);
 	//DMINFO("     [ENODATA=%d][lbn=%llu][t_v=%x][type=%d][ver=%d]", r==0, lbn, r, tv.type, tv.ver);
 
@@ -222,8 +220,8 @@ static int handle_read_xremap(struct dedup_config *dc, struct bio *bio)
 	} else if (tv.type == 1 && t != tv.ver) {
 		/* entry found in the LBN->PBN store and is a remoteread*/
 		lbn = remap_tarSSD(lbn, t, tv.ver);
-		bio->bi_opf = (bio->bi_opf & (~REQ_OP_MASK)) | REQ_OP_REMOTEREAD | REQ_NOMERGE;
-		bio->bi_write_hint = t;
+		clone->bi_opf = (clone->bi_opf & (~REQ_OP_MASK)) | REQ_OP_REMOTEREAD | REQ_NOMERGE;
+		clone->bi_write_hint = t;
 		//DMINFO("     [t=%d][v=%d][lbn=%llu][op=%x]", t, tv.ver, lbn, bio->bi_opf);
 		do_io(dc, clone, lbn);
 	} else {
@@ -336,7 +334,7 @@ int allocate_block(struct dedup_config *dc, uint64_t *pbn_new)
 		r = dc->mdops->flush_meta(dc->bmd);
 		if (r < 0)
 			DMERR("Failed to flush the metadata to disk.");
-		DMINFO("garbage_collect is trigged.");
+		DMINFO("garbage_collect is trigged while allocating.");
 		dc->writes_after_flush = 0;
 		r = dc->mdops->alloc_data_block(dc->bmd, pbn_new);
 	}
@@ -522,18 +520,20 @@ static int issue_remap(struct dedup_config *dc, u64 lpn1, u64 lpn2, int last);
 static int handle_write_no_hash_xremap(struct dedup_config *dc,
 				struct bio *bio, uint64_t lbn, u8 *hash)
 {
-	int r, t;
+	int r,ref, t;
 	t_v tv;
 	u64 lbn2;
 	struct hash_pbn_value_x hashpbn_value_x;
 	t = calculate_tarSSD(lbn);
-	r = dc->mdops->get_refcount(dc->bmd, lbn);
-	tv.type = (r & 0x80000000) != 0;
-	tv.ver = (r & 0x7fffffff);
+	ref = dc->mdops->get_refcount(dc->bmd, lbn);
+	tv.type = (ref & 0x80000000) != 0;
+	tv.ver = (ref & 0x7fffffff);
 	if(tv.type == 1){
 		if(t != tv.ver) {
 			lbn2 = remap_tarSSD(lbn, t, tv.ver);
 			r = issue_discard(dc, lbn2, t);
+			if(r < 0)
+				return r;
 			bio->bi_iter.bi_ssdno = t;
 		}
 		r = dc->mdops->set_refcount(dc->bmd, lbn, 0);
@@ -551,6 +551,8 @@ static int handle_write_no_hash_xremap(struct dedup_config *dc,
 					 dc->crypto_key_size,
 					 (void *)&hashpbn_value_x,
 					 sizeof(hashpbn_value_x));
+	if (r < 0)
+		return r;
 	do_io_remap_device(dc, bio);
 	dc->uniqwrites++;
 	return r;
@@ -706,10 +708,10 @@ out:
  * Returns 1 on collision
  */
 static int check_collision(struct dedup_config *dc, u64 lpn, int oldno) {
-	int i;
+	//int i;
 	t_v tv;
 	u64 num = dc->pblocks;
-	u64 percent = 1;
+	//u64 percent = 1;
 	u64 len = dc->remote_len;
 	int val = 0, tmp = 0;
 	u64 base = lpn % len;
@@ -764,57 +766,58 @@ static int handle_write_with_hash_xremap(struct dedup_config *dc, struct bio *bi
 				  u64 lbn, u8 *final_hash,
 				  struct hash_pbn_value_x hashpbn_value_x)
 {
-	int r, tmp;
-	t_v old_tv, new_tv, tv;
-	u32 vsize, val;
-	struct lbn_pbn_value lbnpbn_value;
+	int r, ref, tmp;
+	t_v old_tv, cur_tv, lbn_tv;
+	u32 val;
+	//struct lbn_pbn_value lbnpbn_value;
 	u64 pbn_this, lbn2;
 
 	pbn_this = hashpbn_value_x.pbn;//lpn remap to
 	old_tv.type = hashpbn_value_x.tv.type;
 	old_tv.ver = hashpbn_value_x.tv.ver;
-	r = dc->mdops->get_refcount(dc->bmd, pbn_this);
-	new_tv.type = (r & 0x80000000) != 0;
-	new_tv.ver = (r & 0x7fffffff);
-	r = dc->mdops->get_refcount(dc->bmd, lbn);
-	tv.type = (r & 0x80000000) != 0;
-	tv.ver = (r & 0x7fffffff);
-	if (new_tv.type == 1 || new_tv.ver != old_tv.ver) {//指纹无效
+	ref = dc->mdops->get_refcount(dc->bmd, pbn_this);
+	cur_tv.type = (ref & 0x80000000) != 0;
+	cur_tv.ver = (ref & 0x7fffffff);
+	ref = dc->mdops->get_refcount(dc->bmd, lbn);
+	lbn_tv.type = (ref & 0x80000000) != 0;
+	lbn_tv.ver = (ref & 0x7fffffff);
+	if (cur_tv.type == 1 || cur_tv.ver != old_tv.ver) {//指纹无效
 		/* No LBN->PBN mapping entry */
 		//r = dc->kvs_hash_pbn->kvs_delete(dc->kvs_hash_pbn, (void *)final_hash, dc->crypto_key_size);
 		r = handle_write_no_hash_xremap(dc, bio, lbn, final_hash);
 		dc->hit_wrong_fp++;
 	} else {
+		//Re-write the same data to the same pos
 		if(pbn_this == lbn) {
 			bio->bi_status = BLK_STS_OK;
 			bio_endio(bio);
 			dc->dupwrites++;
 			return 0;
 		}
-		new_tv.type = 1;
-		new_tv.ver = calculate_tarSSD(pbn_this);
-		if(check_collision(dc, lbn, new_tv.ver)){//发生冲突
+		cur_tv.type = 1;
+		cur_tv.ver = calculate_tarSSD(pbn_this);
+		if(check_collision(dc, lbn, cur_tv.ver)){//发生冲突
 			//r = dc->kvs_hash_pbn->kvs_delete(dc->kvs_hash_pbn, (void *)final_hash, dc->crypto_key_size);
 			r = handle_write_no_hash_xremap(dc, bio, lbn, final_hash);
 			dc->hit_corrupt_fp++;
 			return r;
 		}
 		/* LBN->PBN mapping entry exists */
-		val = (new_tv.type << 31) | new_tv.ver;
+		val = (cur_tv.type << 31) | cur_tv.ver;
 		r = dc->mdops->set_refcount(dc->bmd, lbn, val);
 		tmp = calculate_tarSSD(lbn);
-		if(tv.type == 0) {
-			if(tv.ver > 0 &&  tmp != new_tv.ver){
+		if(lbn_tv.type == 0) {
+			if(lbn_tv.ver > 0 &&  tmp != cur_tv.ver){
 				r = issue_discard(dc, lbn, tmp);
 			}
 			r = issue_remap(dc, pbn_this, lbn, tmp);
 		}
 		else {	
-			if(new_tv.ver != tv.ver){
-				lbn2 = remap_tarSSD(lbn, tmp, tv.ver);
+			if(cur_tv.ver != lbn_tv.ver){
+				lbn2 = remap_tarSSD(lbn, tmp, lbn_tv.ver);
 				r = issue_discard(dc, lbn2, tmp);
 			}
-			r = issue_remap(dc, pbn_this, lbn, tv.ver);
+			r = issue_remap(dc, pbn_this, lbn, lbn_tv.ver);
 		}
 		if (r == 0) {
 			bio->bi_status = BLK_STS_OK;
@@ -1056,7 +1059,7 @@ out:
  */
 static void process_bio(struct dedup_config *dc, struct bio *bio)
 {
-	int r, i;
+	int r;
 
 	if (bio->bi_opf & (REQ_PREFLUSH | REQ_FUA) && !bio_sectors(bio)) {
 		r = dc->mdops->flush_meta(dc->bmd);
@@ -1852,9 +1855,9 @@ out:
 static int cleanup_hash_pbn_x(void *key, int32_t ksize, void *value,
 			    s32 vsize, void *data)
 {
-	int r = 0;
+	int r = 0, ref = 0;
 	u64 pbn_val = 0;
-	t_v old_tv, new_tv;
+	t_v old_tv, cur_tv;
 	struct hash_pbn_value_x hashpbn_value_x = *((struct hash_pbn_value_x *)value);
 	struct dedup_config *dc = (struct dedup_config *)data;
 
@@ -1863,11 +1866,11 @@ static int cleanup_hash_pbn_x(void *key, int32_t ksize, void *value,
 	pbn_val = hashpbn_value_x.pbn;
 	old_tv.type = hashpbn_value_x.tv.type;
 	old_tv.ver = hashpbn_value_x.tv.ver;
-	r = dc->mdops->get_refcount(dc->bmd, pbn_val);
-	new_tv.type = (r & 0x80000000) != 0;
-	new_tv.ver = (r & 0x7fffffff);
+	ref = dc->mdops->get_refcount(dc->bmd, pbn_val);
+	cur_tv.type = (ref & 0x80000000) != 0;
+	cur_tv.ver = (ref & 0x7fffffff);
 
-	if (new_tv.type == 1 || new_tv.ver  != old_tv.ver) {
+	if (cur_tv.type == 1 || cur_tv.ver  != old_tv.ver) {
 		r = dc->kvs_hash_pbn->kvs_delete(dc->kvs_hash_pbn,
 							key, ksize);
 		if (r < 0)
