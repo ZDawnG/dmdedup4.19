@@ -858,7 +858,7 @@ static int kvs_delete_entry(struct kvstore_xremap_sparse *kvxremap,
 
 		r = dm_btree_insert(&(kvxremap->info), kvxremap->root,
 				    &cur_key_val, cur_entry, &(kvxremap->root));
-		DMWARN("Marked as tombstone for keyval = %lld", cur_key_val);
+		// DMWARN("Marked as tombstone for keyval = %lld", cur_key_val);
 	} else {
 		/*
 		 * There is a next key and it is not a linearly probed one.
@@ -869,8 +869,8 @@ static int kvs_delete_entry(struct kvstore_xremap_sparse *kvxremap,
 				    kvxremap->root,
 				    &cur_key_val,
 				    &(kvxremap->root));
-		DMWARN("Performed actual deletion for keyval = %lld",
-		       cur_key_val);
+		/* DMWARN("Performed actual deletion for keyval = %lld",
+		       cur_key_val); */
 	}
 	return r;
 }
@@ -915,7 +915,7 @@ static int kvs_delete_sparse_xremap(struct kvstore *kvs,
 			/* Key found. */
 			r = kvs_delete_entry(kvxremap, cur_entry, next_entry,
 					     cur_key_val, r);
-			DMWARN("Deleted key successfully");
+			// DMWARN("Deleted key successfully");
 			goto out;
 		} else if (r == 0) {
 			/* Key not found but there is a next key. */

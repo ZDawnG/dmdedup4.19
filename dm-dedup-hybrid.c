@@ -851,7 +851,7 @@ static int kvs_delete_entry(struct kvstore_hybrid_sparse *kvhybrid,
 
 		r = dm_btree_insert(&(kvhybrid->info), kvhybrid->root,
 				    &cur_key_val, cur_entry, &(kvhybrid->root));
-		DMWARN("Marked as tombstone for keyval = %lld", cur_key_val);
+		// DMWARN("Marked as tombstone for keyval = %lld", cur_key_val);
 	} else {
 		/*
 		 * There is a next key and it is not a linearly probed one.
@@ -862,8 +862,8 @@ static int kvs_delete_entry(struct kvstore_hybrid_sparse *kvhybrid,
 				    kvhybrid->root,
 				    &cur_key_val,
 				    &(kvhybrid->root));
-		DMWARN("Performed actual deletion for keyval = %lld",
-		       cur_key_val);
+		/* DMWARN("Performed actual deletion for keyval = %lld",
+		       cur_key_val); */
 	}
 	return r;
 }
@@ -908,7 +908,7 @@ static int kvs_delete_sparse_hybrid(struct kvstore *kvs,
 			/* Key found. */
 			r = kvs_delete_entry(kvhybrid, cur_entry, next_entry,
 					     cur_key_val, r);
-			DMWARN("Deleted key successfully");
+			// DMWARN("Deleted key successfully");
 			goto out;
 		} else if (r == 0) {
 			/* Key not found but there is a next key. */
