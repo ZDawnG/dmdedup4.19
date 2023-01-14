@@ -26,6 +26,7 @@
 #include "dm-dedup-cbt.h"
 #include "dm-dedup-xremap.h"
 #include "dm-dedup-hybrid.h"
+#include "dm-dedup-pxremap.h"
 #include "dm-dedup-kvstore.h"
 #include "dm-dedup-check.h"
 
@@ -55,6 +56,7 @@ enum backend {
 	BKND_INRAM,
 	BKND_COWBTREE,
 	BKND_XREMAP,
+	BKND_PXREMAP,
 	BKND_HYBRID
 };
 
@@ -901,7 +903,7 @@ static int handle_write(struct dedup_config *dc, struct bio *bio)
 	r = compute_hash_bio(dc->desc_table, bio, hash);
 	if (r)
 		return r;
-	if (!strcmp(dc->backend_str, "xremap"))
+	if (!strcmp(dc->backend_str, "xremap") || !strcmp(dc->backend_str, "pxremap"))
 		r = dc->kvs_hash_pbn->kvs_lookup(dc->kvs_hash_pbn, hash,
 					 dc->crypto_key_size,
 					 &hashpbn_value_x, &vsize);
@@ -913,13 +915,13 @@ static int handle_write(struct dedup_config *dc, struct bio *bio)
 	if (r == -ENODATA) {
 		dc->hit_none_fp++;
 		dc->inserted_fp++;
-		if (!strcmp(dc->backend_str, "xremap"))
+		if (!strcmp(dc->backend_str, "xremap") || !strcmp(dc->backend_str, "pxremap"))
 			r = handle_write_no_hash_xremap(dc, bio, lbn, hash);
 		else
 			r = handle_write_no_hash(dc, bio, lbn, hash);
 	}
 	else if (r == 0) {
-		if (!strcmp(dc->backend_str, "xremap"))
+		if (!strcmp(dc->backend_str, "xremap") || !strcmp(dc->backend_str, "pxremap"))
 			r = handle_write_with_hash_xremap(dc, bio, lbn, hash,
 					   hashpbn_value_x);
 		else
@@ -929,7 +931,7 @@ static int handle_write(struct dedup_config *dc, struct bio *bio)
 	if (r < 0)
 		return r;
 
-	if (!strcmp(dc->backend_str, "xremap")) {
+	if (!strcmp(dc->backend_str, "xremap") || !strcmp(dc->backend_str, "pxremap")) {
 		if(dc->inserted_fp >= dc->gc_threhold) {
 			r = garbage_collect(dc);
 			r = dc->mdops->flush_meta(dc->bmd);
@@ -1080,7 +1082,7 @@ static void process_bio(struct dedup_config *dc, struct bio *bio)
 		//for (i = 0; i < bio->bi_vcnt; ++i)
 		//    DMINFO("[bv_page=0x%p][bv_len=%u][bv_offset=%u]", bio->bi_io_vec[i].bv_page, bio->bi_io_vec[i].bv_len, bio->bi_io_vec[i].bv_offset);
 		//DMINFO("\n");
-		if (!strcmp(dc->backend_str, "xremap")) {
+		if (!strcmp(dc->backend_str, "xremap") || !strcmp(dc->backend_str, "pxremap")) {
 			r = handle_read_xremap(dc, bio);
 		}
 		else
@@ -1296,6 +1298,8 @@ static int parse_backend(struct dedup_args *da, struct dm_arg_set *as,
 		da->backend = BKND_COWBTREE;
 	} else if (!strcmp(backend, "xremap")) {
 		da->backend = BKND_XREMAP;
+	} else if (!strcmp(backend, "pxremap")) {
+		da->backend = BKND_PXREMAP;
 	} else if (!strcmp(backend, "hybrid")) {
 		da->backend = BKND_HYBRID;
 	} else {
@@ -1452,6 +1456,7 @@ static int dm_dedup_ctr(struct dm_target *ti, unsigned int argc, char **argv)
 	struct init_param_inram iparam_inram;
 	struct init_param_cowbtree iparam_cowbtree;
 	struct init_param_xremap iparam_xremap;
+	struct init_param_pxremap iparam_pxremap;
 	struct init_param_hybrid iparam_hybrid;
 	void *iparam = NULL;
 	struct metadata *md = NULL;
@@ -1552,6 +1557,12 @@ static int dm_dedup_ctr(struct dm_target *ti, unsigned int argc, char **argv)
 		iparam_xremap.metadata_bdev = da.meta_dev->bdev;
 		iparam = &iparam_xremap;
 		break;
+	case BKND_PXREMAP:
+		dc->mdops = &metadata_ops_pxremap;
+		iparam_pxremap.blocks = dc->pblocks;
+		iparam_pxremap.metadata_bdev = da.meta_dev->bdev;
+		iparam = &iparam_pxremap;
+		break;
 	case BKND_HYBRID:
 		dc->mdops = &metadata_ops_hybrid;
 		iparam_hybrid.blocks = dc->pblocks;
@@ -1580,6 +1591,7 @@ static int dm_dedup_ctr(struct dm_target *ti, unsigned int argc, char **argv)
 
 	switch (da.backend) {
 		case BKND_XREMAP:
+		case BKND_PXREMAP:
 			dc->kvs_hash_pbn = dc->mdops->kvs_create_sparse(md, crypto_key_size,
 				sizeof(struct hash_pbn_value_x),
 				dc->pblocks, unformatted);
@@ -1749,6 +1761,7 @@ static void dm_dedup_status(struct dm_target *ti, status_type_t status_type,
 	u64 mapping_io_cnt;
 	u64 refcount_io_cnt;
 	u64 others_io_cnt;
+	u64 persist_io_cnt;
 	u64 data_total_block_count;
 	u64 data_used_block_count;
 	u64 data_free_block_count;
@@ -1763,6 +1776,7 @@ static void dm_dedup_status(struct dm_target *ti, status_type_t status_type,
 		refcount_io_cnt = c->cntbio_sort[3] + c->cntbio_sort_r[3];
 		refcount_io_cnt += c->cntbio_sort[4] + c->cntbio_sort_r[4];
 		others_io_cnt = c->cntbio_sort[0] + c->cntbio_sort_r[0];
+		persist_io_cnt = c->cntbio_sort[5] + c->cntbio_sort_r[5];
 		
 		data_used_block_count = dc->physical_block_counter;
 		data_actual_block_count = dc->logical_block_counter;
@@ -1771,8 +1785,8 @@ static void dm_dedup_status(struct dm_target *ti, status_type_t status_type,
 		data_free_block_count =
 			data_total_block_count - data_used_block_count;
 		
-		DMEMIT("meta_io_cnt:%llu,fp_io_cnt:%llu,mapping_io_cnt:%llu,refcount_io_cnt:%llu,others_io_cnt:%llu,",
-				meta_io_cnt, fp_io_cnt, mapping_io_cnt, refcount_io_cnt, others_io_cnt);
+		DMEMIT("meta_io_cnt:%llu,fp_io_cnt:%llu,mapping_io_cnt:%llu,refcount_io_cnt:%llu,others_io_cnt:%llu,persist_io_cnt:%llu,",
+				meta_io_cnt, fp_io_cnt, mapping_io_cnt, refcount_io_cnt, others_io_cnt, persist_io_cnt);
 		DMEMIT("gc_count:%llu,gc_fp_count:%llu,", dc->gc_count, dc->gc_fp_count);
 		DMEMIT("hit_right_fp:%llu,hit_wrong_fp:%llu,hit_corrupt_fp:%llu,hit_none_fp:%llu,",
 				dc->hit_right_fp, dc->hit_wrong_fp, dc->hit_corrupt_fp, dc->hit_none_fp);
@@ -1898,7 +1912,7 @@ static int garbage_collect(struct dedup_config *dc)
 
 	BUG_ON(!dc);
 
-	if (!strcmp(dc->backend_str, "xremap")) {
+	if (!strcmp(dc->backend_str, "xremap") || !strcmp(dc->backend_str, "pxremap")) {
 		err = dc->kvs_hash_pbn->kvs_iterate(dc->kvs_hash_pbn,
 			&cleanup_hash_pbn_x, (void *)dc);
 	}
