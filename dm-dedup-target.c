@@ -1595,14 +1595,13 @@ static int dm_dedup_ctr(struct dm_target *ti, unsigned int argc, char **argv)
 			dc->kvs_hash_pbn = dc->mdops->kvs_create_sparse(md, crypto_key_size,
 				sizeof(struct hash_pbn_value_x),
 				dc->pblocks, unformatted);
-			dc->gc_threhold = dc->pblocks * da.gc_rate / 100;
 			break;
 		default:
 			dc->kvs_hash_pbn = dc->mdops->kvs_create_sparse(md, crypto_key_size,
 				sizeof(struct hash_pbn_value),
 				dc->pblocks, unformatted);
-			dc->gc_threhold = dc->pblocks * da.gc_rate / 100;
 	}
+	dc->gc_threhold = 1ULL * dc->pblocks * da.gc_rate / 100;
 	if (IS_ERR(dc->kvs_hash_pbn)) {
 		ti->error = "failed to create sparse KVS";
 		r = PTR_ERR(dc->kvs_hash_pbn);
