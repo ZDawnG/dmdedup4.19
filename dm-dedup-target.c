@@ -34,6 +34,10 @@
 
 #define MIN_IOS 64
 
+#define TV_TYPE 0x80000000
+#define TV_VER  0x7fffffff
+#define TV_BIT  31
+
 #define MIN_DATA_DEV_BLOCK_SIZE (4 * 1024)
 #define MAX_DATA_DEV_BLOCK_SIZE (1024 * 1024)
 
@@ -211,8 +215,8 @@ static int handle_read_xremap(struct dedup_config *dc, struct bio *bio)
 
 	/* get the pbn in LBN->PBN store for incoming lbn */
 	ref = dc->mdops->get_refcount(dc->bmd, lbn);
-	tv.type = (ref & 0x80000000) != 0;
-	tv.ver = (ref & 0x7fffffff);
+	tv.type = (ref & TV_TYPE) != 0;
+	tv.ver = (ref & TV_VER);
 	t = calculate_tarSSD(lbn);
 	//DMINFO("     [ENODATA=%d][lbn=%llu][t_v=%x][type=%d][ver=%d]", r==0, lbn, r, tv.type, tv.ver);
 
@@ -528,8 +532,8 @@ static int handle_write_no_hash_xremap(struct dedup_config *dc,
 	struct hash_pbn_value_x hashpbn_value_x;
 	t = calculate_tarSSD(lbn);
 	ref = dc->mdops->get_refcount(dc->bmd, lbn);
-	tv.type = (ref & 0x80000000) != 0;
-	tv.ver = (ref & 0x7fffffff);
+	tv.type = (ref & TV_TYPE) != 0;
+	tv.ver = (ref & TV_VER);
 	if(tv.type == 1){
 		if(t != tv.ver) {
 			lbn2 = remap_tarSSD(lbn, t, tv.ver);
@@ -543,8 +547,8 @@ static int handle_write_no_hash_xremap(struct dedup_config *dc,
 
 	r = dc->mdops->inc_refcount(dc->bmd, lbn);
 	r = dc->mdops->get_refcount(dc->bmd, lbn);
-	tv.type = (r & 0x80000000) != 0;
-	tv.ver = (r & 0x7fffffff);
+	tv.type = (r & TV_TYPE) != 0;
+	tv.ver = (r & TV_VER);
 	
 	hashpbn_value_x.tv.type = tv.type;
 	hashpbn_value_x.tv.ver = tv.ver;
@@ -730,8 +734,8 @@ static int check_collision(struct dedup_config *dc, u64 lpn, int oldno) {
 		}
 			
 		val = dc->mdops->get_refcount(dc->bmd, base);
-		tv.type = (val & 0x80000000) != 0;
-		tv.ver = (val & 0x7fffffff);
+		tv.type = (val & TV_TYPE) != 0;
+		tv.ver = (val & TV_VER);
 		tmp = calculate_tarSSD(base);
 		if((tv.type) && (tmp != tv.ver) && (oldno == tv.ver))
 			return 1;
@@ -747,8 +751,8 @@ static int check_collision(struct dedup_config *dc, u64 lpn, int oldno) {
             	continue;
             }
 			val = dc->mdops->get_refcount(dc->bmd, base);
-			tv.type = (val & 0x80000000) != 0;
-			tv.ver = (val & 0x7fffffff);
+			tv.type = (val & TV_TYPE) != 0;
+			tv.ver = (val & TV_VER);
 			if((tv.type) && (oldno == tv.ver))
 				return 1;
 			cur += 1;
@@ -778,11 +782,11 @@ static int handle_write_with_hash_xremap(struct dedup_config *dc, struct bio *bi
 	old_tv.type = hashpbn_value_x.tv.type;
 	old_tv.ver = hashpbn_value_x.tv.ver;
 	ref = dc->mdops->get_refcount(dc->bmd, pbn_this);
-	cur_tv.type = (ref & 0x80000000) != 0;
-	cur_tv.ver = (ref & 0x7fffffff);
+	cur_tv.type = (ref & TV_TYPE) != 0;
+	cur_tv.ver = (ref & TV_VER);
 	ref = dc->mdops->get_refcount(dc->bmd, lbn);
-	lbn_tv.type = (ref & 0x80000000) != 0;
-	lbn_tv.ver = (ref & 0x7fffffff);
+	lbn_tv.type = (ref & TV_TYPE) != 0;
+	lbn_tv.ver = (ref & TV_VER);
 	if (cur_tv.type == 1 || cur_tv.ver != old_tv.ver) {//指纹无效
 		/* No LBN->PBN mapping entry */
 		//r = dc->kvs_hash_pbn->kvs_delete(dc->kvs_hash_pbn, (void *)final_hash, dc->crypto_key_size);
@@ -805,7 +809,7 @@ static int handle_write_with_hash_xremap(struct dedup_config *dc, struct bio *bi
 			return r;
 		}
 		/* LBN->PBN mapping entry exists */
-		val = (cur_tv.type << 31) | cur_tv.ver;
+		val = (cur_tv.type << TV_BIT) | cur_tv.ver;
 		r = dc->mdops->set_refcount(dc->bmd, lbn, val);
 		tmp = calculate_tarSSD(lbn);
 		if(lbn_tv.type == 0) {
@@ -1880,8 +1884,8 @@ static int cleanup_hash_pbn_x(void *key, int32_t ksize, void *value,
 	old_tv.type = hashpbn_value_x.tv.type;
 	old_tv.ver = hashpbn_value_x.tv.ver;
 	ref = dc->mdops->get_refcount(dc->bmd, pbn_val);
-	cur_tv.type = (ref & 0x80000000) != 0;
-	cur_tv.ver = (ref & 0x7fffffff);
+	cur_tv.type = (ref & TV_TYPE) != 0;
+	cur_tv.ver = (ref & TV_VER);
 
 	if (cur_tv.type == 1 || cur_tv.ver  != old_tv.ver) {
 		r = dc->kvs_hash_pbn->kvs_delete(dc->kvs_hash_pbn,
