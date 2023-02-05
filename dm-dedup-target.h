@@ -50,6 +50,8 @@
 
 #define MIN_DEDUP_WORK_IO	16
 
+#define TV_U32
+
 /* Per target instance structure */
 struct dedup_config {
 	struct dm_dev *data_dev;
@@ -124,10 +126,17 @@ struct hash_pbn_value {
 };
 
 /* Type means if it's tarSSD no. Ver means version no.*/
+#ifdef TV_U32
 typedef struct type_value {
 	u32 ver:31;
 	u32 type:1;
 }t_v;
+#else
+typedef struct type_value {
+	u8 ver:7;
+	u8 type:1;
+}t_v;
+#endif
 
 /* Value of the HASH-PBN key-value store */
 struct hash_pbn_value_x {

@@ -36,7 +36,12 @@
 
 #define TV_TYPE 0x80000000
 #define TV_VER  0x7fffffff
+
+#ifdef TV_U32
 #define TV_BIT  31
+#else
+#define TV_BIT  7
+#endif
 
 #define MIN_DATA_DEV_BLOCK_SIZE (4 * 1024)
 #define MAX_DATA_DEV_BLOCK_SIZE (1024 * 1024)
