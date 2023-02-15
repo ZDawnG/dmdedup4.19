@@ -1603,12 +1603,12 @@ static int dm_dedup_ctr(struct dm_target *ti, unsigned int argc, char **argv)
 		case BKND_PXREMAP:
 			dc->kvs_hash_pbn = dc->mdops->kvs_create_sparse(md, crypto_key_size,
 				sizeof(struct hash_pbn_value_x),
-				dc->pblocks, unformatted);
+				dc->pblocks, unformatted, 0);
 			break;
 		default:
 			dc->kvs_hash_pbn = dc->mdops->kvs_create_sparse(md, crypto_key_size,
 				sizeof(struct hash_pbn_value),
-				dc->pblocks, unformatted);
+				dc->pblocks, unformatted, 0);
 	}
 	dc->gc_threhold = 1ULL * dc->pblocks * da.gc_rate / 100;
 	if (IS_ERR(dc->kvs_hash_pbn)) {
@@ -1874,6 +1874,7 @@ out:
  * Returns -ERR code in failure.
  * Returns 0 on success.
  */
+#ifndef TV_MODE
 static int cleanup_hash_pbn_x(void *key, int32_t ksize, void *value,
 			    s32 vsize, void *data)
 {
@@ -1906,6 +1907,45 @@ static int cleanup_hash_pbn_x(void *key, int32_t ksize, void *value,
 out:
 	return r;
 }
+
+#else
+static int cleanup_hash_pbn_x(void *key, int32_t ksize, void *value,
+			    s32 vsize, void *data)
+{
+	int r = 0, ref = 0;
+	u64 pbn_val = 0;
+	t_v old_tv, cur_tv;
+	struct hash_pbn_value_x hashpbn_value_x = *((struct hash_pbn_value_x *)value);
+	struct dedup_config *dc = (struct dedup_config *)data;
+
+	BUG_ON(!data);
+
+	pbn_val = hashpbn_value_x.pbn;
+	old_tv.type = hashpbn_value_x.tv.type;
+	old_tv.ver = hashpbn_value_x.tv.ver;
+	ref = dc->mdops->get_refcount(dc->bmd, pbn_val);
+	cur_tv.type = (ref & TV_TYPE) != 0;
+	cur_tv.ver = (ref & TV_VER);
+
+	if (cur_tv.type == 1 || cur_tv.ver  != old_tv.ver) {
+		r = dc->kvs_hash_pbn->kvs_delete(dc->kvs_hash_pbn,
+							key, ksize);
+		if (r < 0)
+			goto out;
+
+		dc->physical_block_counter -= 1;
+		dc->gc_counter++;
+		dc->gc_fp_count++;
+		dc->inserted_fp--;
+	} else {
+		DMINFO("KEY=%x", (*(uint64_t *)key));
+		printk(KERN_INFO "dc->kvs_hash_pbn = %x, dc->kvs_hash_pbn_tmp =  %x", dc->kvs_hash_pbn, dc->kvs_hash_pbn_tmp);
+		dc->kvs_hash_pbn_tmp->kvs_insert(dc->kvs_hash_pbn_tmp, key, ksize, value, vsize);
+	}
+out:
+	return r;
+}
+#endif
 /*
  * Performs garbage collection.
  * Iterates over all Hash->PBN entries and cleans up
@@ -1921,8 +1961,23 @@ static int garbage_collect(struct dedup_config *dc)
 	BUG_ON(!dc);
 
 	if (!strcmp(dc->backend_str, "xremap") || !strcmp(dc->backend_str, "pxremap")) {
+	
+	// #ifndef TV_MODE
+	// 	if (!dc->kvs_hash_pbn_tmp)
+	// 	dc->kvs_hash_pbn_tmp = dc->mdops->kvs_create_sparse(dc->bmd, dc->crypto_key_size,
+	// 			sizeof(struct hash_pbn_value_x),
+	// 			dc->pblocks, false, 1);
+	// #endif
 		err = dc->kvs_hash_pbn->kvs_iterate(dc->kvs_hash_pbn,
 			&cleanup_hash_pbn_x, (void *)dc);
+		
+	// #ifndef TV_MODE
+	// 	delete old hash_pbn btree & repalce the root node
+	// 	dc->mdops->change_hash_pbn_root(dc->bmd);
+	// 	dc->kvs_hash_pbn = dc->kvs_hash_pbn_tmp;
+	// 	dc->kvs_hash_pbn_tmp = NULL;
+	// #endif
+
 	}
 	else {
 	/* Cleanup hashes if the refcount of block == 1 */

@@ -1117,7 +1117,7 @@ out:
 static struct kvstore *kvs_create_sparse_hybrid(struct metadata *md,
 						  u32 ksize, uint32_t vsize,
 						  u32 knummax,
-						  bool unformatted)
+						  bool unformatted, u32 type)
 {
 	struct kvstore_hybrid_sparse *kvs;
 	int r;
@@ -1227,4 +1227,5 @@ struct metadata_ops metadata_ops_hybrid = {
 	.get_bufio_client = get_bufio_client_hybrid,
 	.get_private_data = get_private_data_hybrid,
 	.set_private_data = set_private_data_hybrid,
+	.change_hash_pbn_root = NULL,
 };

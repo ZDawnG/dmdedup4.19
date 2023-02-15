@@ -52,6 +52,7 @@ struct metadata {
 	 */
 	struct kvstore_xremap_linear *kvs_linear;
 	struct kvstore_xremap_sparse *kvs_sparse;
+	//struct kvstore_xremap_sparse *kvs_sparse_tmp;
 
 	u8 private_data[PRIVATE_DATA_SIZE];
 
@@ -514,6 +515,7 @@ begin_trans:
 	md->smax = p->blocks;
 	md->kvs_linear = NULL;
 	md->kvs_sparse = NULL;
+	//md->kvs_sparse_tmp = NULL;
 
 	return md;
 
@@ -553,6 +555,7 @@ static void exit_meta_xremap(struct metadata *md)
 		kfree(md->kvs_linear);
 	}
 	kfree(md->kvs_sparse);
+	//kfree(md->kvs_sparse_tmp);
 
 	kfree(md);
 }
@@ -1005,6 +1008,7 @@ static int kvs_insert_sparse_xremap(struct kvstore *kvs, void *key,
 	struct kvstore_xremap_sparse *kvxremap = NULL;
 
 	kvxremap = container_of(kvs, struct kvstore_xremap_sparse, ckvs);
+	//printk(KERN_INFO "kvs_hash_pbn = %x, kvxremap->root = %x", kvs, kvxremap->root);
 
 	if (ksize != kvs->ksize)
 		return -EINVAL;
@@ -1040,7 +1044,8 @@ static int kvs_insert_sparse_xremap(struct kvstore *kvs, void *key,
 			}
 			return 0;
 		} else if (r >= 0) {
-			DMINFO("Collision detected for key: %s",(char *)key);
+			//DMINFO("Collision detected for key: %x", key_val);
+			//DMINFO("Collision detected for key: %s",(char *)key);
 			key_val++;
 		} else {
 			kfree(entry);
@@ -1124,7 +1129,7 @@ out:
 static struct kvstore *kvs_create_sparse_xremap(struct metadata *md,
 						  u32 ksize, uint32_t vsize,
 						  u32 knummax,
-						  bool unformatted)
+						  bool unformatted, u32 type)
 {
 	struct kvstore_xremap_sparse *kvs;
 	int r;
@@ -1133,8 +1138,8 @@ static struct kvstore *kvs_create_sparse_xremap(struct metadata *md,
 		return ERR_PTR(-ENOTSUPP);
 
 	/* We do not support two or more KVSs at the moment */
-	if (md->kvs_sparse)
-		return ERR_PTR(-EBUSY);
+	// if (md->kvs_sparse)
+	// 	return ERR_PTR(-EBUSY);
 
 	kvs = kmalloc(sizeof(*kvs), GFP_NOIO);
 	if (!kvs)
@@ -1177,6 +1182,9 @@ static struct kvstore *kvs_create_sparse_xremap(struct metadata *md,
 		kvs->ckvs.kvs_delete = kvs_delete_sparse_xremap;
 		kvs->ckvs.kvs_iterate = kvs_iterate_sparse_xremap;
 
+		// if(type)
+		// 	md->kvs_sparse_tmp  = kvs;
+		// else
 		md->kvs_sparse = kvs;
 	}
 
@@ -1216,6 +1224,15 @@ void* get_bufio_client_xremap(struct metadata *md)
 	return (void*)(bm->bufio);
 };
 
+void change_hash_pbn_root_xremmap(struct metadata *md) {
+	// struct kvstore_xremap_sparse *kvxremap = md->kvs_sparse;
+	// struct kvstore_xremap_sparse *kvxremap_tmp = md->kvs_sparse_tmp;
+	
+	// dm_btree_del(&(kvxremap->info), kvxremap->root);
+	// md->kvs_sparse = kvxremap_tmp;
+	// md->kvs_sparse_tmp = NULL;
+}
+
 struct metadata_ops metadata_ops_xremap = {
 	.init_meta = init_meta_xremap,
 	.exit_meta = exit_meta_xremap,
@@ -1234,5 +1251,6 @@ struct metadata_ops metadata_ops_xremap = {
 	.get_bufio_client = get_bufio_client_xremap,
 	.get_private_data = get_private_data_xremap,
 	.set_private_data = set_private_data_xremap,
+	.change_hash_pbn_root = change_hash_pbn_root_xremmap,
 
 };

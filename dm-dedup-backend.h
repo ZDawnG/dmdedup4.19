@@ -59,7 +59,7 @@ struct metadata_ops {
 	 */
 	struct kvstore * (*kvs_create_sparse)(struct metadata *md,
 					      u32 ksize, uint32_t vsize,
-					      u32 knummax, bool unformatted);
+					      u32 knummax, bool unformatted, u32 type);
 
 	/*
 	 * Returns -ERR code on error.
@@ -125,6 +125,8 @@ struct metadata_ops {
 	void (*flush_bufio_cache)(struct metadata *md);
 
 	void* (*get_bufio_client)(struct metadata *md);
+
+	void (*change_hash_pbn_root)(struct metadata *md);
 };
 
 #endif /* BACKEND_H */

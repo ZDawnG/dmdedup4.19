@@ -1149,7 +1149,7 @@ out:
 static struct kvstore *kvs_create_sparse_pxremap(struct metadata *md,
 						  u32 ksize, uint32_t vsize,
 						  u32 knummax,
-						  bool unformatted)
+						  bool unformatted, u32 type)
 {
 	struct kvstore_pxremap_sparse *kvs;
 	int r;
@@ -1259,5 +1259,5 @@ struct metadata_ops metadata_ops_pxremap = {
 	.get_bufio_client = get_bufio_client_pxremap,
 	.get_private_data = get_private_data_pxremap,
 	.set_private_data = set_private_data_pxremap,
-
+	.change_hash_pbn_root = NULL,
 };

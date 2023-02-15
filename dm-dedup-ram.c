@@ -539,7 +539,7 @@ out:
 
 static struct kvstore *kvs_create_sparse_inram(struct metadata *md,
 					       u32 ksize, u32 vsize,
-					       u32 knummax, bool unformatted)
+					       u32 knummax, bool unformatted, u32 type)
 {
 	struct kvstore_inram *kvs;
 	u64 kvstore_size, tmp;
@@ -602,4 +602,5 @@ struct metadata_ops metadata_ops_inram = {
 
 	.flush_bufio_cache = NULL,
 	.get_bufio_client = NULL,
+	.change_hash_pbn_root = NULL,
 };

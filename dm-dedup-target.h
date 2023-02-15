@@ -50,7 +50,7 @@
 
 #define MIN_DEDUP_WORK_IO	16
 
-#define TV_U32
+// #define TV_U32
 
 /* Per target instance structure */
 struct dedup_config {
@@ -107,6 +107,7 @@ struct dedup_config {
 	struct metadata_ops *mdops;
 	struct metadata *bmd;
 	struct kvstore *kvs_hash_pbn;
+	struct kvstore *kvs_hash_pbn_tmp;
 	struct kvstore *kvs_lbn_pbn;
 
 	char crypto_alg[CRYPTO_ALG_NAME_LEN];
