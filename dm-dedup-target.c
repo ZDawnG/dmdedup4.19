@@ -34,13 +34,20 @@
 
 #define MIN_IOS 64
 
+#ifdef TV_U32
+
 #define TV_TYPE 0x80000000
 #define TV_VER  0x7fffffff
-
-#ifdef TV_U32
+#define TV_MAX  0x7fffffff
 #define TV_BIT  31
+
 #else
+
+#define TV_TYPE 0x80
+#define TV_VER  0x7f
+#define TV_MAX  0x7f
 #define TV_BIT  7
+
 #endif
 
 #define MIN_DATA_DEV_BLOCK_SIZE (4 * 1024)
@@ -554,10 +561,15 @@ static int handle_write_no_hash_xremap(struct dedup_config *dc,
 	r = dc->mdops->get_refcount(dc->bmd, lbn);
 	tv.type = (r & TV_TYPE) != 0;
 	tv.ver = (r & TV_VER);
+
+	if(tv.ver >= TV_MAX) {
+		dc->gc_needed = 1;
+	}
 	
 	hashpbn_value_x.tv.type = tv.type;
 	hashpbn_value_x.tv.ver = tv.ver;
 	hashpbn_value_x.pbn = lbn;
+	r = dc->kvs_hash_pbn->kvs_delete(dc->kvs_hash_pbn, (void *)hash, dc->crypto_key_size);
 	r = dc->kvs_hash_pbn->kvs_insert(dc->kvs_hash_pbn, (void *)hash,
 					 dc->crypto_key_size,
 					 (void *)&hashpbn_value_x,
@@ -921,6 +933,8 @@ static int handle_write(struct dedup_config *dc, struct bio *bio)
 					 dc->crypto_key_size,
 					 &hashpbn_value, &vsize);
 
+	dc->gc_needed = 0;
+
 	if (r == -ENODATA) {
 		dc->hit_none_fp++;
 		dc->inserted_fp++;
@@ -941,11 +955,12 @@ static int handle_write(struct dedup_config *dc, struct bio *bio)
 		return r;
 
 	if (!strcmp(dc->backend_str, "xremap") || !strcmp(dc->backend_str, "pxremap")) {
-		if(dc->inserted_fp >= dc->gc_threhold) {
+		if(dc->gc_needed || dc->inserted_fp >= dc->gc_threhold) {
 			r = garbage_collect(dc);
 			r = dc->mdops->flush_meta(dc->bmd);
 			DMINFO("garbage_collect is trigged.");
 			dc->writes_after_flush = 0;
+			dc->gc_needed = 0;
 			return 0;
 		}
 	} else {
@@ -1908,6 +1923,34 @@ out:
 	return r;
 }
 
+static int reset_hash_pbn_x(void *key, int32_t ksize, void *value,
+			    s32 vsize, void *data)
+{
+	int r = 0, ref = 0;
+	u64 pbn_val = 0;
+	t_v old_tv, cur_tv;
+	struct hash_pbn_value_x hashpbn_value_x = *((struct hash_pbn_value_x *)value);
+	struct dedup_config *dc = (struct dedup_config *)data;
+
+	BUG_ON(!data);
+
+	pbn_val = hashpbn_value_x.pbn;
+	old_tv.type = hashpbn_value_x.tv.type;
+	old_tv.ver = hashpbn_value_x.tv.ver;
+	ref = dc->mdops->get_refcount(dc->bmd, pbn_val);
+	cur_tv.type = (ref & TV_TYPE) != 0;
+	cur_tv.ver = (ref & TV_VER);
+	if (cur_tv.type == 0 && cur_tv.ver  == old_tv.ver) {
+		dc->mdops->set_refcount(dc->bmd, pbn_val, 1);
+		hashpbn_value_x.tv.type = 0;
+		hashpbn_value_x.tv.ver = 1;
+		r = dc->kvs_hash_pbn->kvs_delete(dc->kvs_hash_pbn, key, ksize);
+		r = dc->kvs_hash_pbn->kvs_insert(dc->kvs_hash_pbn,
+							key, ksize, (void*)(&hashpbn_value_x), vsize);
+	}
+	return r;
+}
+
 #else
 static int cleanup_hash_pbn_x(void *key, int32_t ksize, void *value,
 			    s32 vsize, void *data)
@@ -1970,6 +2013,8 @@ static int garbage_collect(struct dedup_config *dc)
 	// #endif
 		err = dc->kvs_hash_pbn->kvs_iterate(dc->kvs_hash_pbn,
 			&cleanup_hash_pbn_x, (void *)dc);
+		err = dc->kvs_hash_pbn->kvs_iterate(dc->kvs_hash_pbn,
+			&reset_hash_pbn_x, (void *)dc);
 		
 	// #ifndef TV_MODE
 	// 	delete old hash_pbn btree & repalce the root node

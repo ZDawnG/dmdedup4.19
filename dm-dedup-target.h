@@ -82,6 +82,7 @@ struct dedup_config {
 	u64 gc_fp_count;// num of cleaned hash_pbn item
 	u64 gc_threhold;// num of the bound
 	u64 gc_type; 	// =0 percntage, =1 certain number
+	u64 gc_needed;  //equal true if the ver of lbn reached the max
 
 	u64 hit_none_fp;
 	u64 hit_right_fp;
