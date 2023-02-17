@@ -1211,6 +1211,9 @@ struct dedup_args {
 	int flushrq;
 	int gc_rate;
 
+	u64 ssd_num;
+	u64 collision_rate;
+
 	bool corruption_flag;
 };
 
@@ -1393,6 +1396,42 @@ static int parse_gc_rate(struct dedup_args *da, struct dm_arg_set *as,
 }
 
 /*
+ * Parses SSD number.
+ *
+ * Returns -EINVAL in failure.
+ * Returns 0 on success.
+ */
+static int parse_ssd_num(struct dedup_args *da, struct dm_arg_set *as,
+			    char **err)
+{
+	u32 ssd_num;
+	if (kstrtou32(dm_shift_arg(as), 10, &ssd_num)) {
+		*err = "Invalid SSD number";
+		return -EINVAL;
+	}
+	da->ssd_num = ssd_num;
+	return 0;
+}
+
+/*
+ * Parses SSD number.
+ *
+ * Returns -EINVAL in failure.
+ * Returns 0 on success.
+ */
+static int parse_collision_rate(struct dedup_args *da, struct dm_arg_set *as,
+			    char **err)
+{
+	u32 collision_rate;
+	if (kstrtou32(dm_shift_arg(as), 10, &collision_rate)) {
+		*err = "Invalid collision rate";
+		return -EINVAL;
+	}
+	da->collision_rate = collision_rate;
+	return 0;
+}
+
+/*
  * Wrapper function for all parse functions.
  *
  * Returns -ERR code in failure.
@@ -1404,12 +1443,12 @@ static int parse_dedup_args(struct dedup_args *da, int argc,
 	struct dm_arg_set as;
 	int r;
 
-	if (argc < 8) {
+	if (argc < 10) {
 		*err = "Insufficient args";
 		return -EINVAL;
 	}
 
-	if (argc > 8) {
+	if (argc > 10) {
 		*err = "Too many args";
 		return -EINVAL;
 	}
@@ -1446,6 +1485,14 @@ static int parse_dedup_args(struct dedup_args *da, int argc,
 		return r;
 
 	r = parse_gc_rate(da, &as, err);
+	if (r)
+		return r;
+
+	r = parse_ssd_num(da, &as, err);
+	if (r)
+		return r;
+
+	r = parse_collision_rate(da, &as, err);
 	if (r)
 		return r;
 
@@ -1687,7 +1734,7 @@ static int dm_dedup_ctr(struct dm_target *ti, unsigned int argc, char **argv)
 	dc->invalid_fp = 0;
 	dc->inserted_fp = 0;
 
-	dc->remote_len = dc->pblocks / 4;
+	dc->remote_len = dc->pblocks * da.collision_rate / (da.ssd_num * 100);
 
 	dc->check_corruption = da.corruption_flag;
 	dc->fec = false;
