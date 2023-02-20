@@ -737,6 +737,10 @@ static int check_collision(struct dedup_config *dc, u64 lpn, int oldno) {
 	//u64 percent = 1;
 	u64 len = dc->remote_len;
 	int val = 0, tmp = 0;
+	
+	if(len == 0) {
+		return (oldno != calculate_tarSSD(lpn));
+	}
 	u64 base = lpn % len;
 	//base -= (base % 4);
 	//len = len / 4;
