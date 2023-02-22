@@ -152,8 +152,8 @@ static inline unsigned long read_tsc(void) {
     return var;
 }
 
-static int calculate_tarSSD(u64 lpn) {
-	sector_t align_size = 4, tmp = 0;
+static int calculate_tarSSD(struct dedup_config *dc, u64 lpn) {
+	sector_t align_size = dc->ssd_num, tmp = 0;
 	tmp = sector_div(lpn, align_size);
 	return tmp;
 }
@@ -229,7 +229,7 @@ static int handle_read_xremap(struct dedup_config *dc, struct bio *bio)
 	ref = dc->mdops->get_refcount(dc->bmd, lbn);
 	tv.type = (ref & TV_TYPE) != 0;
 	tv.ver = (ref & TV_VER);
-	t = calculate_tarSSD(lbn);
+	t = calculate_tarSSD(dc, lbn);
 	//DMINFO("     [ENODATA=%d][lbn=%llu][t_v=%x][type=%d][ver=%d]", r==0, lbn, r, tv.type, tv.ver);
 
 	if (tv.type == 0 && tv.ver == 0) {
@@ -542,7 +542,7 @@ static int handle_write_no_hash_xremap(struct dedup_config *dc,
 	t_v tv;
 	u64 lbn2;
 	struct hash_pbn_value_x hashpbn_value_x;
-	t = calculate_tarSSD(lbn);
+	t = calculate_tarSSD(dc, lbn);
 	ref = dc->mdops->get_refcount(dc->bmd, lbn);
 	tv.type = (ref & TV_TYPE) != 0;
 	tv.ver = (ref & TV_VER);
@@ -739,12 +739,12 @@ static int check_collision(struct dedup_config *dc, u64 lpn, int oldno) {
 	int val = 0, tmp = 0;
 	
 	if(len == 0) {
-		return (oldno != calculate_tarSSD(lpn));
+		return (oldno != calculate_tarSSD(dc, lpn));
 	}
 	u64 base = lpn % len;
 	//base -= (base % 4);
 	//len = len / 4;
-	if(oldno == calculate_tarSSD(lpn)) {
+	if(oldno == calculate_tarSSD(dc, lpn)) {
 		return 0;
 	}
 	while (base < num)
@@ -757,7 +757,7 @@ static int check_collision(struct dedup_config *dc, u64 lpn, int oldno) {
 		val = dc->mdops->get_refcount(dc->bmd, base);
 		tv.type = (val & TV_TYPE) != 0;
 		tv.ver = (val & TV_VER);
-		tmp = calculate_tarSSD(base);
+		tmp = calculate_tarSSD(dc, base);
 		if((tv.type) && (tmp != tv.ver) && (oldno == tv.ver))
 			return 1;
 		base += len;
@@ -822,7 +822,7 @@ static int handle_write_with_hash_xremap(struct dedup_config *dc, struct bio *bi
 			return 0;
 		}
 		cur_tv.type = 1;
-		cur_tv.ver = calculate_tarSSD(pbn_this);
+		cur_tv.ver = calculate_tarSSD(dc, pbn_this);
 		if(check_collision(dc, lbn, cur_tv.ver)){//发生冲突
 			//r = dc->kvs_hash_pbn->kvs_delete(dc->kvs_hash_pbn, (void *)final_hash, dc->crypto_key_size);
 			r = handle_write_no_hash_xremap(dc, bio, lbn, final_hash);
@@ -832,7 +832,7 @@ static int handle_write_with_hash_xremap(struct dedup_config *dc, struct bio *bi
 		/* LBN->PBN mapping entry exists */
 		val = (cur_tv.type << TV_BIT) | cur_tv.ver;
 		r = dc->mdops->set_refcount(dc->bmd, lbn, val);
-		tmp = calculate_tarSSD(lbn);
+		tmp = calculate_tarSSD(dc, lbn);
 		if(lbn_tv.type == 0) {
 			if(lbn_tv.ver > 0 &&  tmp != cur_tv.ver){
 				r = issue_discard(dc, lbn, tmp);
@@ -1738,6 +1738,7 @@ static int dm_dedup_ctr(struct dm_target *ti, unsigned int argc, char **argv)
 	dc->invalid_fp = 0;
 	dc->inserted_fp = 0;
 
+	dc->ssd_num = da.ssd_num;
 	dc->remote_len = dc->pblocks * da.collision_rate / (da.ssd_num * 100);
 
 	dc->check_corruption = da.corruption_flag;
@@ -1917,7 +1918,7 @@ static int cleanup_hash_pbn(void *key, int32_t ksize, void *value,
 		if (r < 0)
 			goto out_dec_refcount;
 
-		issue_discard(dc, pbn_val, calculate_tarSSD(pbn_val));
+		issue_discard(dc, pbn_val, calculate_tarSSD(dc, pbn_val));
 		dc->physical_block_counter -= 1;
 		dc->gc_counter++;
 		dc->gc_fp_count++;
@@ -2096,7 +2097,7 @@ static int issue_discard(struct dedup_config *dc, u64 lpn, int id)
 	u32 id1, id2;
 	int err = 0;
 	sector_t dev_start = lpn * 8, dev_end = 8;
-	id1 = calculate_tarSSD(lpn);
+	id1 = calculate_tarSSD(dc, lpn);
 	id2 = id;
 
 	BUG_ON(!dc);
@@ -2142,8 +2143,8 @@ static int issue_remap(struct dedup_config *dc, u64 lpn1, u64 lpn2, int last)
 	int err = 0;
 	
 	sector_t dev_start = lpn1 * 8, dev_end = 8, dev_s2 = lpn2 * 8;
-	id1 = calculate_tarSSD(lpn1);
-	id2 = calculate_tarSSD(lpn2);
+	id1 = calculate_tarSSD(dc, lpn1);
+	id2 = calculate_tarSSD(dc, lpn2);
 
 	BUG_ON(!dc);
 

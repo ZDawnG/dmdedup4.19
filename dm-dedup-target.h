@@ -93,6 +93,7 @@ struct dedup_config {
 	u64 inserted_fp;
 
 	u64 remote_len;
+	u64 ssd_num;
 
 	/* flag to check for data corruption */
 	bool	check_corruption;
