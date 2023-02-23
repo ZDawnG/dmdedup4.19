@@ -2200,7 +2200,7 @@ static int dm_dedup_message(struct dm_target *ti,
 			    unsigned int argc, char **argv,
 			    char *result, unsigned maxlen)
 {
-	int r = 0;
+	int r = 0, i = 0;
 	uint64_t lpn1 = 0, lpn2 = 0;
 
 	struct dedup_config *dc = ti->private;
@@ -2217,15 +2217,13 @@ static int dm_dedup_message(struct dm_target *ti,
         } else if (!strcasecmp(argv[1], "begin")){
 			//lpn1 = intStr2int(argv[2], strlen(argv[2]));
 			//DMINFO("lpn = %llx", (unsigned long long)lpn1);
-			r = issue_begin_end(dc, 0, -1);
-			r = issue_begin_end(dc, 1, -1);
-			r = issue_begin_end(dc, 2, -1);
-			r = issue_begin_end(dc, 3, -1);
+			for(i = 0; i < dc->ssd_num; ++i) {
+				r = issue_begin_end(dc, i, -1);
+			}
 		} else if (!strcasecmp(argv[1], "end")){
-			r = issue_begin_end(dc, 0, -2);
-			r = issue_begin_end(dc, 1, -2);
-			r = issue_begin_end(dc, 2, -2);
-			r = issue_begin_end(dc, 3, -2);
+			for(i = 0; i < dc->ssd_num; ++i) {
+				r = issue_begin_end(dc, i, -2);
+			}
 		}
 		if (r)
 			DMERR("Error in issue begin_end: %d.", r);
