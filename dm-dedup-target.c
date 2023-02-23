@@ -1537,7 +1537,7 @@ static int dm_dedup_ctr(struct dm_target *ti, unsigned int argc, char **argv)
 	struct metadata *md = NULL;
 
 	sector_t data_size;
-	int r;
+	int r, i;
 	int crypto_key_size;
 
 	struct on_disk_stats d;
@@ -1762,10 +1762,9 @@ static int dm_dedup_ctr(struct dm_target *ti, unsigned int argc, char **argv)
 	ti->discards_supported = true;
 	ti->num_discard_bios = 1;
 	ti->private = dc;
-	blkdev_issue_discard(dc->data_dev->bdev, 0, 8, GFP_NOIO, 0, -1, dc->remote_len);
-	blkdev_issue_discard(dc->data_dev->bdev, 8, 8, GFP_NOIO, 0, -1, dc->remote_len);
-	blkdev_issue_discard(dc->data_dev->bdev, 16, 8, GFP_NOIO, 0, -1, dc->remote_len);
-	blkdev_issue_discard(dc->data_dev->bdev, 24, 8, GFP_NOIO, 0, -1, dc->remote_len);
+	for(i = 0; i < dc->ssd_num; ++i) {
+		blkdev_issue_discard(dc->data_dev->bdev, i*8, 8, GFP_NOIO, 0, -1, dc->remote_len);
+	}
 	return 0;
 
 bad_kvstore_init:
