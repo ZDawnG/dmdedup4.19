@@ -9,3 +9,6 @@ all:
 
 clean:
 	make -C /lib/modules/$(shell uname -r)/build M=$(PWD) clean
+
+install:
+	cp dm-dedup.ko /lib/modules/$(shell uname -r)/kernel/drivers/md
