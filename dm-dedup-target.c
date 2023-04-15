@@ -50,6 +50,7 @@
 
 #endif
 
+#define CPU_FREQ (1900)
 #define MIN_DATA_DEV_BLOCK_SIZE (4 * 1024)
 #define MAX_DATA_DEV_BLOCK_SIZE (1024 * 1024)
 
@@ -150,6 +151,40 @@ static inline unsigned long read_tsc(void) {
     var = ((unsigned long long int) hi << 32) | lo;
     
     return var;
+}
+
+static void cycles2us(struct dedup_config *dc) {
+	int i;
+	for(i = 0; i < PREIOD_NUM; ++i) {
+		dc->total_period_time[i] /= CPU_FREQ;
+	}
+}
+
+static void calc_tsc(struct dedup_config *dc, int period, int type) {
+    unsigned long var, t;
+    unsigned int hi, lo;
+
+	asm volatile ("rdtsc" : "=a" (lo), "=d" (hi));
+    var = ((unsigned long long int) hi << 32) | lo;
+	if(!dc->enable_time_stats)
+		return;
+	switch (type)
+	{
+	case PERIOD_START:
+		dc->tmp_period_time[period] = var;
+		break;
+	case PERIOD_END:
+		if(dc->tmp_period_time[period]) {
+			t = var - dc->tmp_period_time[period];
+			dc->total_period_time[period] += t;
+		}
+		dc->tmp_period_time[period] = 0;
+		break;
+	default:
+		break;
+	}
+	
+    return;
 }
 
 static int calculate_tarSSD(struct dedup_config *dc, u64 lpn) {
@@ -340,7 +375,9 @@ int allocate_block(struct dedup_config *dc, uint64_t *pbn_new)
 {
 	int r;
 
+	calc_tsc(dc, PERIOD_IO, PERIOD_START);
 	r = dc->mdops->alloc_data_block(dc->bmd, pbn_new);
+	calc_tsc(dc, PERIOD_IO, PERIOD_END);
 
 	if (!r) {
 		dc->logical_block_counter++;
@@ -349,7 +386,9 @@ int allocate_block(struct dedup_config *dc, uint64_t *pbn_new)
 		r = garbage_collect(dc);
 		if(r)
 			return r;
+		calc_tsc(dc, PERIOD_FUA, PERIOD_START);
 		r = dc->mdops->flush_meta(dc->bmd);
+		calc_tsc(dc, PERIOD_FUA, PERIOD_END);
 		if (r < 0)
 			DMERR("Failed to flush the metadata to disk.");
 		DMINFO("garbage_collect is trigged while allocating.");
@@ -381,14 +420,19 @@ static int alloc_pbnblk_and_insert_lbn_pbn(struct dedup_config *dc,
 	}
 
 	lbnpbn_value.pbn = *pbn_new;
+	calc_tsc(dc, PERIOD_IO, PERIOD_START);
 	do_io(dc, bio, *pbn_new);
+	calc_tsc(dc, PERIOD_IO, PERIOD_END);
 
+	calc_tsc(dc, PERIOD_L2P, PERIOD_START);
 	r = dc->kvs_lbn_pbn->kvs_insert(dc->kvs_lbn_pbn, (void *)&lbn,
 					sizeof(lbn), (void *)&lbnpbn_value,
 					sizeof(lbnpbn_value));
+	calc_tsc(dc, PERIOD_L2P, PERIOD_END);
+	calc_tsc(dc, PERIOD_REF, PERIOD_START);
 	if (r < 0)
 		dc->mdops->dec_refcount(dc->bmd, *pbn_new);
-
+	calc_tsc(dc, PERIOD_REF, PERIOD_END);
 	return r;
 }
 
@@ -413,17 +457,21 @@ static int __handle_no_lbn_pbn(struct dedup_config *dc,
 	if (r < 0)
 		goto out;
 
+	calc_tsc(dc, PERIOD_FP, PERIOD_START);
 	/* Inserts new hash-pbn mapping for given hash. */
 	hashpbn_value.pbn = pbn_new;
 	r = dc->kvs_hash_pbn->kvs_insert(dc->kvs_hash_pbn, (void *)hash,
 					 dc->crypto_key_size,
 					 (void *)&hashpbn_value,
 					 sizeof(hashpbn_value));
+	calc_tsc(dc, PERIOD_FP, PERIOD_END);
 	if (r < 0)
 		goto kvs_insert_err;
 
+	calc_tsc(dc, PERIOD_REF, PERIOD_START);
 	/* Increments refcount for new pbn entry created. */
 	r = dc->mdops->inc_refcount(dc->bmd, pbn_new);
+	calc_tsc(dc, PERIOD_REF, PERIOD_END);
 	if (r < 0)
 		goto inc_refcount_err;
 
@@ -473,15 +521,18 @@ static int __handle_has_lbn_pbn(struct dedup_config *dc,
 	if (r < 0)
 		goto out;
 
+	calc_tsc(dc, PERIOD_FP, PERIOD_START);
 	/* Inserts new hash-pbn entry for given hash. */
 	hashpbn_value.pbn = pbn_new;
 	r = dc->kvs_hash_pbn->kvs_insert(dc->kvs_hash_pbn, (void *)hash,
 					 dc->crypto_key_size,
 					 (void *)&hashpbn_value,
 					 sizeof(hashpbn_value));
+	calc_tsc(dc, PERIOD_FP, PERIOD_END);
 	if (r < 0)
 		goto kvs_insert_err;
 
+	calc_tsc(dc, PERIOD_REF, PERIOD_START);
 	/* Increments refcount of new pbn. */
 	r = dc->mdops->inc_refcount(dc->bmd, pbn_new);
 	if (r < 0)
@@ -494,6 +545,7 @@ static int __handle_has_lbn_pbn(struct dedup_config *dc,
 	dc->logical_block_counter--;
 	if(1 == dc->mdops->get_refcount(dc->bmd, pbn_old))
 		dc->invalid_fp++;
+	calc_tsc(dc, PERIOD_REF, PERIOD_END);
 
 	/* On all successful steps increment overwrite count. */
 	dc->overwrites++;
@@ -549,7 +601,9 @@ static int handle_write_no_hash_xremap(struct dedup_config *dc,
 	if(tv.type == 1){
 		if(t != tv.ver) {
 			lbn2 = remap_tarSSD(lbn, t, tv.ver);
+			calc_tsc(dc, PERIOD_IO, PERIOD_START);
 			r = issue_discard(dc, lbn2, t);
+			calc_tsc(dc, PERIOD_IO, PERIOD_END);
 			if(r < 0)
 				return r;
 			bio->bi_iter.bi_ssdno = t;
@@ -569,14 +623,18 @@ static int handle_write_no_hash_xremap(struct dedup_config *dc,
 	hashpbn_value_x.tv.type = tv.type;
 	hashpbn_value_x.tv.ver = tv.ver;
 	hashpbn_value_x.pbn = lbn;
+	calc_tsc(dc, PERIOD_FP, PERIOD_START);
 	r = dc->kvs_hash_pbn->kvs_delete(dc->kvs_hash_pbn, (void *)hash, dc->crypto_key_size);
 	r = dc->kvs_hash_pbn->kvs_insert(dc->kvs_hash_pbn, (void *)hash,
 					 dc->crypto_key_size,
 					 (void *)&hashpbn_value_x,
 					 sizeof(hashpbn_value_x));
+	calc_tsc(dc, PERIOD_FP, PERIOD_END);
 	if (r < 0)
 		return r;
+	calc_tsc(dc, PERIOD_IO, PERIOD_START);
 	do_io_remap_device(dc, bio);
+	calc_tsc(dc, PERIOD_IO, PERIOD_END);
 	dc->uniqwrites++;
 	return r;
 }
@@ -594,9 +652,11 @@ static int handle_write_no_hash(struct dedup_config *dc,
 	u32 vsize;
 	struct lbn_pbn_value lbnpbn_value;
 
+	calc_tsc(dc, PERIOD_L2P, PERIOD_START);
 	r = dc->kvs_lbn_pbn->kvs_lookup(dc->kvs_lbn_pbn, (void *)&lbn,
 					sizeof(lbn), (void *)&lbnpbn_value,
 					&vsize);
+	calc_tsc(dc, PERIOD_L2P, PERIOD_END);
 	if (r == -ENODATA) {
 		/* No LBN->PBN mapping entry */
 		r = __handle_no_lbn_pbn(dc, bio, lbn, hash);
@@ -623,6 +683,7 @@ static int __handle_no_lbn_pbn_with_hash(struct dedup_config *dc,
 {
 	int r = 0, ret;
 
+	calc_tsc(dc, PERIOD_REF, PERIOD_START);
 	/* Increments refcount of this passed pbn */
 	r = dc->mdops->inc_refcount(dc->bmd, pbn_this);
 	if (r < 0)
@@ -630,13 +691,16 @@ static int __handle_no_lbn_pbn_with_hash(struct dedup_config *dc,
 	if(2 == dc->mdops->get_refcount(dc->bmd, pbn_this)){
 		dc->invalid_fp--;
 	}
+	calc_tsc(dc, PERIOD_REF, PERIOD_END);
 
 	lbnpbn_value.pbn = pbn_this;
 
+	calc_tsc(dc, PERIOD_L2P, PERIOD_START);
 	/* Insert lbn->pbn_this entry */
 	r = dc->kvs_lbn_pbn->kvs_insert(dc->kvs_lbn_pbn, (void *)&lbn,
 					sizeof(lbn), (void *)&lbnpbn_value,
 					sizeof(lbnpbn_value));
+	calc_tsc(dc, PERIOD_L2P, PERIOD_END);
 	if (r < 0)
 		goto kvs_insert_error;
 
@@ -678,27 +742,33 @@ static int __handle_has_lbn_pbn_with_hash(struct dedup_config *dc,
 	if (pbn_this == pbn_old)
 		goto out;
 
+	calc_tsc(dc, PERIOD_REF, PERIOD_START);
 	/* Increments refcount of this passed pbn */
 	r = dc->mdops->inc_refcount(dc->bmd, pbn_this);
+	calc_tsc(dc, PERIOD_REF, PERIOD_END);
 	if (r < 0)
 		goto out;
 
 	this_lbnpbn_value.pbn = pbn_this;
 
+	calc_tsc(dc, PERIOD_L2P, PERIOD_START);
 	/* Insert lbn->pbn_this entry */
 	r = dc->kvs_lbn_pbn->kvs_insert(dc->kvs_lbn_pbn, (void *)&lbn,
 					sizeof(lbn),
 					(void *)&this_lbnpbn_value,
 					sizeof(this_lbnpbn_value));
+	calc_tsc(dc, PERIOD_L2P, PERIOD_END);
 	if (r < 0)
 		goto kvs_insert_err;
 
+	calc_tsc(dc, PERIOD_REF, PERIOD_START);
 	/* Decrement refcount of old pbn */
 	r = dc->mdops->dec_refcount(dc->bmd, pbn_old);
 	if (r < 0)
 		goto dec_refcount_err;
 	if(1 == dc->mdops->get_refcount(dc->bmd, pbn_old))
 		dc->invalid_fp++;
+	calc_tsc(dc, PERIOD_REF, PERIOD_END);
 
 	goto out;	/* all OK */
 
@@ -833,6 +903,7 @@ static int handle_write_with_hash_xremap(struct dedup_config *dc, struct bio *bi
 		val = (cur_tv.type << TV_BIT) | cur_tv.ver;
 		r = dc->mdops->set_refcount(dc->bmd, lbn, val);
 		tmp = calculate_tarSSD(dc, lbn);
+		calc_tsc(dc, PERIOD_IO, PERIOD_START);
 		if(lbn_tv.type == 0) {
 			if(lbn_tv.ver > 0 &&  tmp != cur_tv.ver){
 				r = issue_discard(dc, lbn, tmp);
@@ -846,6 +917,7 @@ static int handle_write_with_hash_xremap(struct dedup_config *dc, struct bio *bi
 			}
 			r = issue_remap(dc, pbn_this, lbn, lbn_tv.ver);
 		}
+		calc_tsc(dc, PERIOD_IO, PERIOD_END);
 		if (r == 0) {
 			bio->bi_status = BLK_STS_OK;
 			bio_endio(bio);
@@ -873,8 +945,10 @@ static int handle_write_with_hash(struct dedup_config *dc, struct bio *bio,
 	u64 pbn_this;
 
 	pbn_this = hashpbn_value.pbn;
+	calc_tsc(dc, PERIOD_L2P, PERIOD_START);
 	r = dc->kvs_lbn_pbn->kvs_lookup(dc->kvs_lbn_pbn, (void *)&lbn,
 					sizeof(lbn), (void *)&lbnpbn_value, &vsize);
+	calc_tsc(dc, PERIOD_L2P, PERIOD_END);
 
 	if (r == -ENODATA) {
 		/* No LBN->PBN mapping entry */
@@ -925,9 +999,12 @@ static int handle_write(struct dedup_config *dc, struct bio *bio)
 
 	lbn = bio_lbn(dc, bio);
 
+	calc_tsc(dc, PERIOD_HASH, PERIOD_START);
 	r = compute_hash_bio(dc->desc_table, bio, hash);
+	calc_tsc(dc, PERIOD_HASH, PERIOD_END);
 	if (r)
 		return r;
+	calc_tsc(dc, PERIOD_FP, PERIOD_START);
 	if (!strcmp(dc->backend_str, "xremap") || !strcmp(dc->backend_str, "pxremap"))
 		r = dc->kvs_hash_pbn->kvs_lookup(dc->kvs_hash_pbn, hash,
 					 dc->crypto_key_size,
@@ -936,7 +1013,7 @@ static int handle_write(struct dedup_config *dc, struct bio *bio)
 		r = dc->kvs_hash_pbn->kvs_lookup(dc->kvs_hash_pbn, hash,
 					 dc->crypto_key_size,
 					 &hashpbn_value, &vsize);
-
+	calc_tsc(dc, PERIOD_FP, PERIOD_END);
 	dc->gc_needed = 0;
 
 	if (r == -ENODATA) {
@@ -961,7 +1038,9 @@ static int handle_write(struct dedup_config *dc, struct bio *bio)
 	if (!strcmp(dc->backend_str, "xremap") || !strcmp(dc->backend_str, "pxremap")) {
 		if(dc->gc_needed || dc->inserted_fp >= dc->gc_threhold) {
 			r = garbage_collect(dc);
+			calc_tsc(dc, PERIOD_FUA, PERIOD_START);
 			r = dc->mdops->flush_meta(dc->bmd);
+			calc_tsc(dc, PERIOD_FUA, PERIOD_END);
 			DMINFO("garbage_collect is trigged.");
 			dc->writes_after_flush = 0;
 			dc->gc_needed = 0;
@@ -970,7 +1049,9 @@ static int handle_write(struct dedup_config *dc, struct bio *bio)
 	} else {
 		if(dc->invalid_fp >= dc->gc_threhold) {
 			r = garbage_collect(dc);
+			calc_tsc(dc, PERIOD_FUA, PERIOD_START);
 			r = dc->mdops->flush_meta(dc->bmd);
+			calc_tsc(dc, PERIOD_FUA, PERIOD_END);
 			DMINFO("garbage_collect is trigged.");
 			dc->writes_after_flush = 0;
 			return 0;
@@ -980,7 +1061,9 @@ static int handle_write(struct dedup_config *dc, struct bio *bio)
 	dc->writes_after_flush++;
 	if ((dc->flushrq > 0 && dc->writes_after_flush >= dc->flushrq) ||
 	    (bio->bi_opf & (REQ_PREFLUSH | REQ_FUA))) {
+		calc_tsc(dc, PERIOD_FUA, PERIOD_START);
 		r = dc->mdops->flush_meta(dc->bmd);
+		calc_tsc(dc, PERIOD_FUA, PERIOD_END);
 		if (r < 0)
 			return r;
 		dc->writes_after_flush = 0;
@@ -989,7 +1072,9 @@ static int handle_write(struct dedup_config *dc, struct bio *bio)
 		unsigned long x, t = read_tsc();
 		x = (t - dc->time_last_flush) / 1900000;
 		if(x >= flushrq) {
+			calc_tsc(dc, PERIOD_FUA, PERIOD_START);
 			r = dc->mdops->flush_meta(dc->bmd);
+			calc_tsc(dc, PERIOD_FUA, PERIOD_END);
 			if (r < 0)
 				return r;
 			dc->writes_after_flush = 0;
@@ -1092,7 +1177,9 @@ static void process_bio(struct dedup_config *dc, struct bio *bio)
 	int r;
 
 	if (bio->bi_opf & (REQ_PREFLUSH | REQ_FUA) && !bio_sectors(bio)) {
+		calc_tsc(dc, PERIOD_FUA, PERIOD_START);
 		r = dc->mdops->flush_meta(dc->bmd);
+		calc_tsc(dc, PERIOD_FUA, PERIOD_END);
 		if (r == 0)
 			dc->writes_after_flush = 0;
 		do_io_remap_device(dc, bio);
@@ -1110,18 +1197,22 @@ static void process_bio(struct dedup_config *dc, struct bio *bio)
 		//for (i = 0; i < bio->bi_vcnt; ++i)
 		//    DMINFO("[bv_page=0x%p][bv_len=%u][bv_offset=%u]", bio->bi_io_vec[i].bv_page, bio->bi_io_vec[i].bv_len, bio->bi_io_vec[i].bv_offset);
 		//DMINFO("\n");
+		calc_tsc(dc, PERIOD_READ, PERIOD_START);
 		if (!strcmp(dc->backend_str, "xremap") || !strcmp(dc->backend_str, "pxremap")) {
 			r = handle_read_xremap(dc, bio);
 		}
 		else
 			r = handle_read(dc, bio);
+		calc_tsc(dc, PERIOD_READ, PERIOD_END);
 		break;
 	case WRITE:
 		//DMINFO("WRITE:[bi_sector=0x%llx][bi_size=%u][bi_vcnt=%hu]", (unsigned long long)bio->bi_iter.bi_sector, bio->bi_iter.bi_size, bio->bi_vcnt);
 		//for (i = 0; i < bio->bi_vcnt; ++i)
 		//    DMINFO("[bv_page=0x%p][bv_len=%u][bv_offset=%u]", bio->bi_io_vec[i].bv_page, bio->bi_io_vec[i].bv_len, bio->bi_io_vec[i].bv_offset);
 		//DMINFO("\n");
+		calc_tsc(dc, PERIOD_WRITE, PERIOD_START);
 		r = handle_write(dc, bio);
+		calc_tsc(dc, PERIOD_WRITE, PERIOD_END);
 	}
 
 	if (r < 0) {
@@ -1159,7 +1250,9 @@ static void do_work(struct work_struct *ws)
 
 	mempool_free(data, dc->dedup_work_pool);
 
+	calc_tsc(dc, PERIOD_TOTAL, PERIOD_START);
 	process_bio(dc, bio);
+	calc_tsc(dc, PERIOD_TOTAL, PERIOD_END);
 }
 
 /*
@@ -1741,6 +1834,11 @@ static int dm_dedup_ctr(struct dm_target *ti, unsigned int argc, char **argv)
 	dc->ssd_num = da.ssd_num;
 	dc->remote_len = dc->pblocks * da.collision_rate / (da.ssd_num * 100);
 
+	dc->enable_time_stats = 0;
+	for(i = 0; i < PREIOD_NUM; ++i) {
+		dc->tmp_period_time[i] = 0;
+		dc->total_period_time[i] = 0;
+	}
 	dc->check_corruption = da.corruption_flag;
 	dc->fec = false;
 	dc->fec_fixed = 0;
@@ -1859,8 +1957,18 @@ static void dm_dedup_status(struct dm_target *ti, status_type_t status_type,
 		data_free_block_count =
 			data_total_block_count - data_used_block_count;
 		
+		cycles2us(dc);
+
 		DMEMIT("meta_io_cnt:%llu,fp_io_cnt:%llu,mapping_io_cnt:%llu,refcount_io_cnt:%llu,others_io_cnt:%llu,persist_io_cnt:%llu,",
 				meta_io_cnt, fp_io_cnt, mapping_io_cnt, refcount_io_cnt, others_io_cnt, persist_io_cnt);
+		DMEMIT("write_meta_io_cnt:%llu,write_fp_io_cnt:%llu,write_mapping_io_cnt:%llu,write_refcount_io_cnt:%llu,write_others_io_cnt:%llu,write_persist_io_cnt:%llu,",
+				c->cntbio_write, c->cntbio_sort[2], c->cntbio_sort[1], c->cntbio_sort[3] + c->cntbio_sort[4], c->cntbio_sort[0], c->cntbio_sort[5]);
+		DMEMIT("read_meta_io_cnt:%llu,read_fp_io_cnt:%llu,read_mapping_io_cnt:%llu,read_refcount_io_cnt:%llu,read_others_io_cnt:%llu,read_persist_io_cnt:%llu,",
+				c->cntbio_read, c->cntbio_sort_r[2], c->cntbio_sort_r[1], c->cntbio_sort_r[3] + c->cntbio_sort_r[4], c->cntbio_sort_r[0], c->cntbio_sort_r[5]);
+		DMEMIT("time_total:%llu, time_read:%llu, time_write:%llu, time_hash:%llu, time_fp:%llu, time_l2p:%llu, time_ref:%llu, time_fua:%llu, time_io:%llu, time_gc:%llu,",
+				dc->total_period_time[PERIOD_TOTAL], dc->total_period_time[PERIOD_READ], dc->total_period_time[PERIOD_WRITE],
+				dc->total_period_time[PERIOD_HASH], dc->total_period_time[PERIOD_FP], dc->total_period_time[PERIOD_L2P],
+				dc->total_period_time[PERIOD_REF], dc->total_period_time[PERIOD_FUA], dc->total_period_time[PERIOD_IO], dc->total_period_time[PERIOD_GC]);
 		DMEMIT("gc_count:%llu,gc_fp_count:%llu,", dc->gc_count, dc->gc_fp_count);
 		DMEMIT("hit_right_fp:%llu,hit_wrong_fp:%llu,hit_corrupt_fp:%llu,hit_none_fp:%llu,",
 				dc->hit_right_fp, dc->hit_wrong_fp, dc->hit_corrupt_fp, dc->hit_none_fp);
@@ -2054,6 +2162,7 @@ static int garbage_collect(struct dedup_config *dc)
 
 	BUG_ON(!dc);
 
+	calc_tsc(dc, PERIOD_GC, PERIOD_START);
 	if (!strcmp(dc->backend_str, "xremap") || !strcmp(dc->backend_str, "pxremap")) {
 	
 	// #ifndef TV_MODE
@@ -2081,6 +2190,7 @@ static int garbage_collect(struct dedup_config *dc)
 			&cleanup_hash_pbn, (void *)dc);
 	}
 	dc->gc_count++;
+	calc_tsc(dc, PERIOD_GC, PERIOD_END);
 	return err;
 }
 
@@ -2210,6 +2320,7 @@ static int dm_dedup_message(struct dm_target *ti,
 		if (r < 0)
 			DMERR("Error in performing garbage_collect: %d.", r);
 	} else if (!strcasecmp(argv[0], "notice")) {
+		dc->enable_time_stats = dc->enable_time_stats ? 0 : 1;
 		if (argc != 2) {
 			DMINFO("Incomplete message: Usage notice <begin/end>");
 			r = -EINVAL;

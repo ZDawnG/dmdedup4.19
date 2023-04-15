@@ -52,6 +52,25 @@
 
 // #define TV_U32
 
+enum {
+	PERIOD_TOTAL = 0,
+	PERIOD_READ,
+	PERIOD_WRITE,
+	PERIOD_HASH,
+	PERIOD_FP,
+	PERIOD_L2P,
+	PERIOD_REF,
+	PERIOD_FUA,
+	PERIOD_IO,
+	PERIOD_GC,
+	PREIOD_NUM
+};
+
+enum {
+	PERIOD_START = 0,
+	PERIOD_END
+};
+
 /* Per target instance structure */
 struct dedup_config {
 	struct dm_dev *data_dev;
@@ -94,6 +113,9 @@ struct dedup_config {
 
 	u64 remote_len;
 	u64 ssd_num;
+	u64 enable_time_stats;
+	u64 tmp_period_time[PREIOD_NUM];
+	u64 total_period_time[PREIOD_NUM];
 
 	/* flag to check for data corruption */
 	bool	check_corruption;
