@@ -77,72 +77,6 @@ enum backend {
 	BKND_HYBRID
 };
 
-#define LIST_SIZE	2
-#define PRIVATE_DATA_SIZE 16
-struct dm_bufio_client {
-	struct mutex lock;
-
-	struct list_head lru[LIST_SIZE];
-	unsigned long n_buffers[LIST_SIZE];
-
-	struct block_device *bdev;
-	unsigned block_size;
-	s8 sectors_per_block_bits;
-	void (*alloc_callback)(struct dm_buffer *);
-	void (*write_callback)(struct dm_buffer *);
-
-	struct kmem_cache *slab_buffer;
-	struct kmem_cache *slab_cache;
-	struct dm_io_client *dm_io;
-
-	struct list_head reserved_buffers;
-	unsigned need_reserved_buffers;
-
-	unsigned minimum_buffers;
-
-	struct rb_root buffer_tree;
-	wait_queue_head_t free_buffer_wait;
-
-	sector_t start;
-
-	int async_write_error;
-	unsigned long long cntio;
-	unsigned long long cntbio;
-	unsigned long long cntbio_read;
-	unsigned long long cntbio_write;
-	unsigned long long cntbio_sort[6];
-	unsigned long long cntbio_sort_r[6];
-	int rw;
-	struct list_head client_list;
-	struct shrinker shrinker;
-};
-
-struct dm_buffer {
-	struct rb_node node;
-	struct list_head lru_list;
-	sector_t block;
-	void *data;
-	unsigned char data_mode;		/* DATA_MODE_* */
-	unsigned char list_mode;		/* LIST_* */
-	blk_status_t read_error;
-	blk_status_t write_error;
-	unsigned hold_count;
-	unsigned long state;
-	unsigned long last_accessed;
-	unsigned dirty_start;
-	unsigned dirty_end;
-	unsigned write_start;
-	unsigned write_end;
-	struct dm_bufio_client *c;
-	struct list_head write_list;
-	void (*end_io)(struct dm_buffer *, blk_status_t);
-#ifdef CONFIG_DM_DEBUG_BLOCK_STACK_TRACING
-#define MAX_STACK 10
-	struct stack_trace stack_trace;
-	unsigned long stack_entries[MAX_STACK];
-#endif
-};
-
 static inline unsigned long read_tsc(void) {
     unsigned long var;
     unsigned int hi, lo;
@@ -812,8 +746,6 @@ static int check_collision(struct dedup_config *dc, u64 lpn, int oldno) {
 		return (oldno != calculate_tarSSD(dc, lpn));
 	}
 	u64 base = lpn % len;
-	//base -= (base % 4);
-	//len = len / 4;
 	if(oldno == calculate_tarSSD(dc, lpn)) {
 		return 0;
 	}
@@ -833,24 +765,6 @@ static int check_collision(struct dedup_config *dc, u64 lpn, int oldno) {
 		base += len;
 	}
 	return 0;
-	
-	/* while (base < num) {
-		cur = base;
-		for(i = 0; i < 4; ++i) {
-			if(cur == lpn) {
-            	cur += 1;
-            	continue;
-            }
-			val = dc->mdops->get_refcount(dc->bmd, base);
-			tv.type = (val & TV_TYPE) != 0;
-			tv.ver = (val & TV_VER);
-			if((tv.type) && (oldno == tv.ver))
-				return 1;
-			cur += 1;
-		}
-		base += len;
-	}
-	return 0; */
 }
 
 /*
@@ -1186,17 +1100,12 @@ static void process_bio(struct dedup_config *dc, struct bio *bio)
 		return;
 	}
 	if (bio_op(bio) == REQ_OP_DISCARD) {
-		//DMINFO("DISCA:[bi_sector=0x%llx][bi_size=%u][bi_vcnt=%hu]", (unsigned long long)bio->bi_iter.bi_sector, bio->bi_iter.bi_size, bio->bi_vcnt);
 		r = handle_discard(dc, bio);
 		return;
 	}
 
 	switch (bio_data_dir(bio)) {
 	case READ:
-		//DMINFO("READ :[bi_sector=0x%llx][bi_size=%u][bi_vcnt=%hu][blk_name=%s]", (unsigned long long)bio->bi_iter.bi_sector, bio->bi_iter.bi_size, bio->bi_vcnt, bio->bi_disk->disk_name);
-		//for (i = 0; i < bio->bi_vcnt; ++i)
-		//    DMINFO("[bv_page=0x%p][bv_len=%u][bv_offset=%u]", bio->bi_io_vec[i].bv_page, bio->bi_io_vec[i].bv_len, bio->bi_io_vec[i].bv_offset);
-		//DMINFO("\n");
 		calc_tsc(dc, PERIOD_READ, PERIOD_START);
 		if (!strcmp(dc->backend_str, "xremap") || !strcmp(dc->backend_str, "pxremap")) {
 			r = handle_read_xremap(dc, bio);
@@ -1206,10 +1115,6 @@ static void process_bio(struct dedup_config *dc, struct bio *bio)
 		calc_tsc(dc, PERIOD_READ, PERIOD_END);
 		break;
 	case WRITE:
-		//DMINFO("WRITE:[bi_sector=0x%llx][bi_size=%u][bi_vcnt=%hu]", (unsigned long long)bio->bi_iter.bi_sector, bio->bi_iter.bi_size, bio->bi_vcnt);
-		//for (i = 0; i < bio->bi_vcnt; ++i)
-		//    DMINFO("[bv_page=0x%p][bv_len=%u][bv_offset=%u]", bio->bi_io_vec[i].bv_page, bio->bi_io_vec[i].bv_len, bio->bi_io_vec[i].bv_offset);
-		//DMINFO("\n");
 		calc_tsc(dc, PERIOD_WRITE, PERIOD_START);
 		r = handle_write(dc, bio);
 		calc_tsc(dc, PERIOD_WRITE, PERIOD_END);
@@ -1973,23 +1878,6 @@ static void dm_dedup_status(struct dm_target *ti, status_type_t status_type,
 		DMEMIT("hit_right_fp:%llu,hit_wrong_fp:%llu,hit_corrupt_fp:%llu,hit_none_fp:%llu,",
 				dc->hit_right_fp, dc->hit_wrong_fp, dc->hit_corrupt_fp, dc->hit_none_fp);
 		DMEMIT("invalid_fp:%llu,inserted_fp:%llu", dc->invalid_fp, dc->inserted_fp);
-
-
-
-		/* DMEMIT("total_block:%llu,free_block:%llu used_block:%llu,actual_block:%llu,",
-		       data_total_block_count, data_free_block_count,
-			data_used_block_count, data_actual_block_count);
-
-		DMEMIT("%d %d:%d %d:%d ",
-		       dc->block_size,
-			MAJOR(dc->data_dev->bdev->bd_dev),
-			MINOR(dc->data_dev->bdev->bd_dev),
-			MAJOR(dc->metadata_dev->bdev->bd_dev),
-			MINOR(dc->metadata_dev->bdev->bd_dev));
-
-		DMEMIT("%llu %llu %llu %llu %llu %llu %llu",
-		       dc->writes, dc->uniqwrites, dc->dupwrites,
-			dc->reads_on_writes, dc->overwrites, dc->newwrites, dc->gc_counter); */
 		break;
 	case STATUSTYPE_TABLE:
 		DMEMIT("%s %s %u %s %s %d",
@@ -2110,43 +1998,6 @@ static int reset_hash_pbn_x(void *key, int32_t ksize, void *value,
 	return r;
 }
 
-#else
-static int cleanup_hash_pbn_x(void *key, int32_t ksize, void *value,
-			    s32 vsize, void *data)
-{
-	int r = 0, ref = 0;
-	u64 pbn_val = 0;
-	t_v old_tv, cur_tv;
-	struct hash_pbn_value_x hashpbn_value_x = *((struct hash_pbn_value_x *)value);
-	struct dedup_config *dc = (struct dedup_config *)data;
-
-	BUG_ON(!data);
-
-	pbn_val = hashpbn_value_x.pbn;
-	old_tv.type = hashpbn_value_x.tv.type;
-	old_tv.ver = hashpbn_value_x.tv.ver;
-	ref = dc->mdops->get_refcount(dc->bmd, pbn_val);
-	cur_tv.type = (ref & TV_TYPE) != 0;
-	cur_tv.ver = (ref & TV_VER);
-
-	if (cur_tv.type == 1 || cur_tv.ver  != old_tv.ver) {
-		r = dc->kvs_hash_pbn->kvs_delete(dc->kvs_hash_pbn,
-							key, ksize);
-		if (r < 0)
-			goto out;
-
-		dc->physical_block_counter -= 1;
-		dc->gc_counter++;
-		dc->gc_fp_count++;
-		dc->inserted_fp--;
-	} else {
-		DMINFO("KEY=%x", (*(uint64_t *)key));
-		printk(KERN_INFO "dc->kvs_hash_pbn = %x, dc->kvs_hash_pbn_tmp =  %x", dc->kvs_hash_pbn, dc->kvs_hash_pbn_tmp);
-		dc->kvs_hash_pbn_tmp->kvs_insert(dc->kvs_hash_pbn_tmp, key, ksize, value, vsize);
-	}
-out:
-	return r;
-}
 #endif
 /*
  * Performs garbage collection.
@@ -2210,7 +2061,6 @@ static int issue_discard(struct dedup_config *dc, u64 lpn, int id)
 	id2 = id;
 
 	BUG_ON(!dc);
-	//DMINFO("[LBN1=%lx][ID1=%d][ID2=%d]", dev_start, id1, id2);
 	err = blkdev_issue_discard(dc->data_dev->bdev, dev_start,
 			dev_end, GFP_NOIO, 0, id1, id2);
 	if (err) {
@@ -2230,7 +2080,6 @@ static int issue_begin_end(struct dedup_config *dc, u64 lpn, int id)
 	id2 = id;
 
 	BUG_ON(!dc);
-	//DMINFO("[LBN1=%lx][ID1=%d][ID2=%d]", dev_start, id1, id2);
 	err = blkdev_issue_discard(dc->data_dev->bdev, dev_start,
 			dev_end, GFP_NOIO, 0, id1, id2);
 	if (err) {
