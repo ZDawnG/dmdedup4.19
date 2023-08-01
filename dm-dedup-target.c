@@ -1176,6 +1176,9 @@ static void process_bio(struct dedup_config *dc, struct bio *bio)
 {
 	int r;
 
+	if(dc->enable_time_stats) {
+		dc->usr_total_cnt += 1;
+	}
 	if (bio->bi_opf & (REQ_PREFLUSH | REQ_FUA) && !bio_sectors(bio)) {
 		calc_tsc(dc, PERIOD_FUA, PERIOD_START);
 		r = dc->mdops->flush_meta(dc->bmd);
@@ -1204,6 +1207,9 @@ static void process_bio(struct dedup_config *dc, struct bio *bio)
 		else
 			r = handle_read(dc, bio);
 		calc_tsc(dc, PERIOD_READ, PERIOD_END);
+		if(dc->enable_time_stats) {
+			dc->usr_reads_cnt += 1;
+		}
 		break;
 	case WRITE:
 		//DMINFO("WRITE:[bi_sector=0x%llx][bi_size=%u][bi_vcnt=%hu]", (unsigned long long)bio->bi_iter.bi_sector, bio->bi_iter.bi_size, bio->bi_vcnt);
@@ -1213,6 +1219,9 @@ static void process_bio(struct dedup_config *dc, struct bio *bio)
 		calc_tsc(dc, PERIOD_WRITE, PERIOD_START);
 		r = handle_write(dc, bio);
 		calc_tsc(dc, PERIOD_WRITE, PERIOD_END);
+		if(dc->enable_time_stats) {
+			dc->usr_write_cnt += 1;
+		}
 	}
 
 	if (r < 0) {
@@ -1826,6 +1835,9 @@ static int dm_dedup_ctr(struct dm_target *ti, unsigned int argc, char **argv)
 	dc->hit_right_fp = 0;
 	dc->hit_wrong_fp = 0;
 	dc->hit_corrupt_fp = 0;
+	dc->usr_total_cnt = 0;
+	dc->usr_write_cnt = 0;
+	dc->usr_reads_cnt = 0;
 
 	dc->gc_type = 0;
 	dc->invalid_fp = 0;
@@ -1957,17 +1969,19 @@ static void dm_dedup_status(struct dm_target *ti, status_type_t status_type,
 		data_free_block_count =
 			data_total_block_count - data_used_block_count;
 		
-		cycles2us(dc);
+		// cycles2us(dc);
+		dc->total_period_time[PERIOD_OTHER] = dc->total_period_time[PERIOD_WRITE] - dc->total_period_time[PERIOD_HASH];
 
+		DMEMIT("usr_total_cnt:%llu,usr_write_cnt:%llu,usr_reads_cnt:%llu,", dc->usr_total_cnt, dc->usr_write_cnt, dc->usr_reads_cnt);
 		DMEMIT("meta_io_cnt:%llu,fp_io_cnt:%llu,mapping_io_cnt:%llu,refcount_io_cnt:%llu,others_io_cnt:%llu,persist_io_cnt:%llu,",
 				meta_io_cnt, fp_io_cnt, mapping_io_cnt, refcount_io_cnt, others_io_cnt, persist_io_cnt);
 		DMEMIT("write_meta_io_cnt:%llu,write_fp_io_cnt:%llu,write_mapping_io_cnt:%llu,write_refcount_io_cnt:%llu,write_others_io_cnt:%llu,write_persist_io_cnt:%llu,",
 				c->cntbio_write, c->cntbio_sort[2], c->cntbio_sort[1], c->cntbio_sort[3] + c->cntbio_sort[4], c->cntbio_sort[0], c->cntbio_sort[5]);
 		DMEMIT("read_meta_io_cnt:%llu,read_fp_io_cnt:%llu,read_mapping_io_cnt:%llu,read_refcount_io_cnt:%llu,read_others_io_cnt:%llu,read_persist_io_cnt:%llu,",
 				c->cntbio_read, c->cntbio_sort_r[2], c->cntbio_sort_r[1], c->cntbio_sort_r[3] + c->cntbio_sort_r[4], c->cntbio_sort_r[0], c->cntbio_sort_r[5]);
-		DMEMIT("time_total:%llu, time_read:%llu, time_write:%llu, time_hash:%llu, time_fp:%llu, time_l2p:%llu, time_ref:%llu, time_fua:%llu, time_io:%llu, time_gc:%llu,",
+		DMEMIT("time_total:%llu, time_read:%llu, time_write:%llu, time_hash:%llu, time_other:%llu, time_fp:%llu, time_l2p:%llu, time_ref:%llu, time_fua:%llu, time_io:%llu, time_gc:%llu,",
 				dc->total_period_time[PERIOD_TOTAL], dc->total_period_time[PERIOD_READ], dc->total_period_time[PERIOD_WRITE],
-				dc->total_period_time[PERIOD_HASH], dc->total_period_time[PERIOD_FP], dc->total_period_time[PERIOD_L2P],
+				dc->total_period_time[PERIOD_HASH], dc->total_period_time[PERIOD_OTHER], dc->total_period_time[PERIOD_FP], dc->total_period_time[PERIOD_L2P],
 				dc->total_period_time[PERIOD_REF], dc->total_period_time[PERIOD_FUA], dc->total_period_time[PERIOD_IO], dc->total_period_time[PERIOD_GC]);
 		DMEMIT("gc_count:%llu,gc_fp_count:%llu,", dc->gc_count, dc->gc_fp_count);
 		DMEMIT("hit_right_fp:%llu,hit_wrong_fp:%llu,hit_corrupt_fp:%llu,hit_none_fp:%llu,",

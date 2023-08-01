@@ -57,6 +57,7 @@ enum {
 	PERIOD_READ,
 	PERIOD_WRITE,
 	PERIOD_HASH,
+	PERIOD_OTHER,
 	PERIOD_FP,
 	PERIOD_L2P,
 	PERIOD_REF,
@@ -102,6 +103,9 @@ struct dedup_config {
 	u64 gc_threhold;// num of the bound
 	u64 gc_type; 	// =0 percntage, =1 certain number
 	u64 gc_needed;  //equal true if the ver of lbn reached the max
+	u64 usr_total_cnt;
+	u64 usr_write_cnt;
+	u64 usr_reads_cnt;
 
 	u64 hit_none_fp;
 	u64 hit_right_fp;
