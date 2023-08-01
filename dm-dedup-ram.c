@@ -557,13 +557,15 @@ static struct kvstore *kvs_create_sparse_inram(struct metadata *md,
 
 	knummax += (knummax * HASHTABLE_OVERPROV) / 100;
 
-	kvstore_size = (knummax * (vsize + ksize));
+	kvstore_size = (1ull * knummax * (vsize + ksize));
 
 	kvs->store = vmalloc(kvstore_size);
 	if (!kvs->store) {
 		kfree(kvs);
 		return ERR_PTR(-ENOMEM);
 	}
+
+	DMINFO("KNUMMAX = 0x%x, KVSSIZE = 0x%llx", knummax, kvstore_size);
 
 	tmp = kvstore_size;
 	(void)do_div(tmp, (1024 * 1024));

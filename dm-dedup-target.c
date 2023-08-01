@@ -299,66 +299,8 @@ static int handle_read(struct dedup_config *dc, struct bio *bio)
 	struct lbn_pbn_value lbnpbn_value;
 	struct check_io *io;
 	struct bio *clone;
-	int r;
-
-	lbn = bio_lbn(dc, bio);
-
-	/* get the pbn in LBN->PBN store for incoming lbn */
-	r = dc->kvs_lbn_pbn->kvs_lookup(dc->kvs_lbn_pbn, (void *)&lbn,
-			sizeof(lbn), (void *)&lbnpbn_value, &vsize);
-	//DMINFO("     [ENODATA=%d][lbn=%llu][pbn=%llu]", r==-ENODATA, lbn, lbnpbn_value.pbn);
-
-	if (r == -ENODATA) {
-		/* unable to find the entry in LBN->PBN store */
-		bio_zero_endio(bio);
-	} else if (r == 0) {
-		/* entry found in the LBN->PBN store */
-
-		/* if corruption check not enabled directly do io request */
-		if (!dc->check_corruption) {
-			clone = bio;
-			goto read_no_fec;
-		}
-
-		/* Prepare check_io structure to be later used for FEC */
-		io = kmalloc(sizeof(struct check_io), GFP_NOIO);
-		io->dc = dc;
-		io->pbn = lbnpbn_value.pbn;
-		io->lbn = lbn;
-		io->base_bio = bio;
-
-		/*
-		 * Prepare bio clone to handle disk read
-		 * clone is created so that we can have our own endio
-		 * where we call bio_endio on original bio
-		 * after corruption checks are done
-		 */
-		clone = bio_clone_fast(bio, GFP_NOIO, &dc->bs);
-		if (!clone) {
-			r = -ENOMEM;
-			goto out_clone_fail;
-		}
-
-		/*
-		 * Store the check_io structure in bio's private field
-		 * used as indirect argument when disk read is finished
-		 */
-		clone->bi_end_io = dedup_check_endio;
-		clone->bi_private = io;
-
-read_no_fec:
-		do_io(dc, clone, lbnpbn_value.pbn);
-	} else {
-		goto out;
-	}
-
-	r = 0;
-	goto out;
-
-out_clone_fail:
-	kfree(io);
-
-out:
+	int r = 0;
+	bio_zero_endio(bio);
 	return r;
 
 }
@@ -976,113 +918,46 @@ static int handle_write(struct dedup_config *dc, struct bio *bio)
 {
 	u64 lbn;
 	u8 hash[MAX_DIGEST_SIZE];
-	struct hash_pbn_value hashpbn_value;
-	struct hash_pbn_value_x hashpbn_value_x;
+	u8 value[MAX_DIGEST_SIZE];
 	u32 vsize;
-	struct bio *new_bio = NULL;
 	int r;
-
-	/* If there is a data corruption make the device read-only */
-	if (dc->corrupted_blocks > dc->fec_fixed)
-		return -EIO;
 
 	dc->writes++;
 
-	/* Read-on-write handling */
-	if (bio->bi_iter.bi_size < dc->block_size) {
-		dc->reads_on_writes++;
-		new_bio = prepare_bio_on_write(dc, bio);
-		if (!new_bio || IS_ERR(new_bio))
-			return -ENOMEM;
-		bio = new_bio;
-	}
-
 	lbn = bio_lbn(dc, bio);
 
-	calc_tsc(dc, PERIOD_HASH, PERIOD_START);
 	r = compute_hash_bio(dc->desc_table, bio, hash);
-	calc_tsc(dc, PERIOD_HASH, PERIOD_END);
 	if (r)
 		return r;
-	calc_tsc(dc, PERIOD_FP, PERIOD_START);
-	if (!strcmp(dc->backend_str, "xremap") || !strcmp(dc->backend_str, "pxremap"))
-		r = dc->kvs_hash_pbn->kvs_lookup(dc->kvs_hash_pbn, hash,
-					 dc->crypto_key_size,
-					 &hashpbn_value_x, &vsize);
-	else
-		r = dc->kvs_hash_pbn->kvs_lookup(dc->kvs_hash_pbn, hash,
-					 dc->crypto_key_size,
-					 &hashpbn_value, &vsize);
-	calc_tsc(dc, PERIOD_FP, PERIOD_END);
-	dc->gc_needed = 0;
+	
+	r = dc->kvs_hash_pbn->kvs_lookup(dc->kvs_hash_pbn, hash, 8, value, &vsize);
 
 	if (r == -ENODATA) {
-		dc->hit_none_fp++;
-		dc->inserted_fp++;
-		if (!strcmp(dc->backend_str, "xremap") || !strcmp(dc->backend_str, "pxremap"))
-			r = handle_write_no_hash_xremap(dc, bio, lbn, hash);
-		else
-			r = handle_write_no_hash(dc, bio, lbn, hash);
+		r = dc->kvs_hash_pbn->kvs_insert(dc->kvs_hash_pbn, (void *)hash, 8, (void *)&hash[8], 8);
+		dc->uniqwrites += 1;
 	}
 	else if (r == 0) {
-		if (!strcmp(dc->backend_str, "xremap") || !strcmp(dc->backend_str, "pxremap"))
-			r = handle_write_with_hash_xremap(dc, bio, lbn, hash,
-					   hashpbn_value_x);
-		else
-			r = handle_write_with_hash(dc, bio, lbn, hash,
-					   hashpbn_value);
+		if (memcmp(&value, &hash[8], 8) == 0) {
+            dc->dupwrites += 1;
+        }
+		else {
+			dc->overwrites += 1;
+		}
 	}
-	if (r < 0)
-		return r;
 
-	if (!strcmp(dc->backend_str, "xremap") || !strcmp(dc->backend_str, "pxremap")) {
-		if(dc->gc_needed || dc->inserted_fp >= dc->gc_threhold) {
-			r = garbage_collect(dc);
-			calc_tsc(dc, PERIOD_FUA, PERIOD_START);
-			r = dc->mdops->flush_meta(dc->bmd);
-			calc_tsc(dc, PERIOD_FUA, PERIOD_END);
-			DMINFO("garbage_collect is trigged.");
-			dc->writes_after_flush = 0;
-			dc->gc_needed = 0;
-			return 0;
-		}
-	} else {
-		if(dc->invalid_fp >= dc->gc_threhold) {
-			r = garbage_collect(dc);
-			calc_tsc(dc, PERIOD_FUA, PERIOD_START);
-			r = dc->mdops->flush_meta(dc->bmd);
-			calc_tsc(dc, PERIOD_FUA, PERIOD_END);
-			DMINFO("garbage_collect is trigged.");
-			dc->writes_after_flush = 0;
-			return 0;
-		}
-	}
-	
 	dc->writes_after_flush++;
 	if ((dc->flushrq > 0 && dc->writes_after_flush >= dc->flushrq) ||
 	    (bio->bi_opf & (REQ_PREFLUSH | REQ_FUA))) {
-		calc_tsc(dc, PERIOD_FUA, PERIOD_START);
 		r = dc->mdops->flush_meta(dc->bmd);
-		calc_tsc(dc, PERIOD_FUA, PERIOD_END);
 		if (r < 0)
 			return r;
 		dc->writes_after_flush = 0;
-	} else if(dc->flushrq < 0) {
-		int flushrq = - dc->flushrq;
-		unsigned long x, t = read_tsc();
-		x = (t - dc->time_last_flush) / 1900000;
-		if(x >= flushrq) {
-			calc_tsc(dc, PERIOD_FUA, PERIOD_START);
-			r = dc->mdops->flush_meta(dc->bmd);
-			calc_tsc(dc, PERIOD_FUA, PERIOD_END);
-			if (r < 0)
-				return r;
-			dc->writes_after_flush = 0;
-			dc->time_last_flush = t;
-		}
 	}
 
-	return 0;
+	bio->bi_status = BLK_STS_OK;
+	bio_endio(bio);
+
+	return r;
 }
 
 /*
@@ -1765,9 +1640,7 @@ static int dm_dedup_ctr(struct dm_target *ti, unsigned int argc, char **argv)
 				dc->pblocks, unformatted, 0);
 			break;
 		default:
-			dc->kvs_hash_pbn = dc->mdops->kvs_create_sparse(md, crypto_key_size,
-				sizeof(struct hash_pbn_value),
-				dc->pblocks, unformatted, 0);
+			dc->kvs_hash_pbn = dc->mdops->kvs_create_sparse(md, 8, 8, 0x40000000, unformatted, 0);
 	}
 	dc->gc_threhold = 1ULL * dc->pblocks * da.gc_rate / 100;
 	if (IS_ERR(dc->kvs_hash_pbn)) {
@@ -1924,6 +1797,23 @@ static void dm_dedup_dtr(struct dm_target *ti)
 
 /* Gives Dmdedup status. */
 static void dm_dedup_status(struct dm_target *ti, status_type_t status_type,
+			    unsigned int status_flags, char *result, unsigned int maxlen)
+{
+	struct dedup_config *dc = ti->private;
+	int sz = 0;
+	
+	switch (status_type) {
+	case STATUSTYPE_INFO:
+		DMEMIT("writes:%llu,uniqwrite:%llu,collision:%llu,same:%llu\n",
+				dc->writes, dc->uniqwrites, dc->dupwrites, dc->overwrites);
+		break;
+	case STATUSTYPE_TABLE:
+		DMEMIT("%s %s %u %s %s %d",
+		    dc->metadata_dev->name, dc->data_dev->name, dc->block_size,
+			dc->crypto_alg, dc->backend_str, dc->flushrq);
+	}
+}
+static void dm_dedup_status_bak(struct dm_target *ti, status_type_t status_type,
 			    unsigned int status_flags, char *result, unsigned int maxlen)
 {
 	struct dedup_config *dc = ti->private;
