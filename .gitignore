@@ -6,3 +6,5 @@ dm-dedup.mod.c
 modules.order
 .tmp_versions/
 .vscode
+.cache
+compile_commands.json

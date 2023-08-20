@@ -26,7 +26,6 @@
 #include "dm-dedup-cbt.h"
 #include "dm-dedup-xremap.h"
 #include "dm-dedup-hybrid.h"
-#include "dm-dedup-pxremap.h"
 #include "dm-dedup-kvstore.h"
 #include "dm-dedup-check.h"
 
@@ -50,7 +49,6 @@
 
 #endif
 
-#define CPU_FREQ (1900)
 #define MIN_DATA_DEV_BLOCK_SIZE (4 * 1024)
 #define MAX_DATA_DEV_BLOCK_SIZE (1024 * 1024)
 
@@ -73,7 +71,6 @@ enum backend {
 	BKND_INRAM,
 	BKND_COWBTREE,
 	BKND_XREMAP,
-	BKND_PXREMAP,
 	BKND_HYBRID
 };
 
@@ -153,13 +150,6 @@ static inline unsigned long read_tsc(void) {
     return var;
 }
 
-static void cycles2us(struct dedup_config *dc) {
-	int i;
-	for(i = 0; i < PREIOD_NUM; ++i) {
-		dc->total_period_time[i] /= CPU_FREQ;
-	}
-}
-
 static void calc_tsc(struct dedup_config *dc, int period, int type) {
     unsigned long var, t;
     unsigned int hi, lo;
@@ -191,6 +181,12 @@ static int calculate_tarSSD(struct dedup_config *dc, u64 lpn) {
 	sector_t align_size = dc->ssd_num, tmp = 0;
 	tmp = sector_div(lpn, align_size);
 	return tmp;
+}
+
+static u64 calculate_entry_offset(struct dedup_config *dc, u64 lpn) {
+	u64 offset =0;
+	offset = lpn % (dc->remote_len);
+	return offset;
 }
 
 static sector_t remap_tarSSD(u64 lpn, int origin, int target) {
@@ -260,7 +256,7 @@ static int handle_read_xremap(struct dedup_config *dc, struct bio *bio)
 	clone = bio;
 	lbn = bio_lbn(dc, bio);
 
-	/* get the pbn in LBN->PBN store for incoming lbn */
+	/* get the tv pair in LBN->tv store for incoming lbn */
 	ref = dc->mdops->get_refcount(dc->bmd, lbn);
 	tv.type = (ref & TV_TYPE) != 0;
 	tv.ver = (ref & TV_VER);
@@ -268,13 +264,13 @@ static int handle_read_xremap(struct dedup_config *dc, struct bio *bio)
 	//DMINFO("     [ENODATA=%d][lbn=%llu][t_v=%x][type=%d][ver=%d]", r==0, lbn, r, tv.type, tv.ver);
 
 	if (tv.type == 0 && tv.ver == 0) {
-		/* unable to find the entry in LBN->PBN store */
+		/* unable to find the entry in LBN->tv store */
 		bio_zero_endio(bio);
 	} else if (tv.type == 1 && t != tv.ver) {
-		/* entry found in the LBN->PBN store and is a remoteread*/
+		/* entry found in the LBN->tv store and is a remoteread*/
 		lbn = remap_tarSSD(lbn, t, tv.ver);
 		clone->bi_opf = (clone->bi_opf & (~REQ_OP_MASK)) | REQ_OP_REMOTEREAD | REQ_NOMERGE;
-		clone->bi_write_hint = t;
+		clone->bi_write_hint = calculate_entry_offset(dc, lbn);
 		//DMINFO("     [t=%d][v=%d][lbn=%llu][op=%x]", t, tv.ver, lbn, bio->bi_opf);
 		do_io(dc, clone, lbn);
 	} else {
@@ -598,8 +594,9 @@ static int handle_write_no_hash_xremap(struct dedup_config *dc,
 	ref = dc->mdops->get_refcount(dc->bmd, lbn);
 	tv.type = (ref & TV_TYPE) != 0;
 	tv.ver = (ref & TV_VER);
+	
 	if(tv.type == 1){
-		if(t != tv.ver) {
+		if(t != tv.ver) { // used mapped to another device
 			lbn2 = remap_tarSSD(lbn, t, tv.ver);
 			calc_tsc(dc, PERIOD_IO, PERIOD_START);
 			r = issue_discard(dc, lbn2, t);
@@ -635,7 +632,8 @@ static int handle_write_no_hash_xremap(struct dedup_config *dc,
 	calc_tsc(dc, PERIOD_IO, PERIOD_START);
 	do_io_remap_device(dc, bio);
 	calc_tsc(dc, PERIOD_IO, PERIOD_END);
-	dc->uniqwrites++;
+	if (dc->enable_time_stats)
+		dc->uniqwrites++;
 	return r;
 }
 
@@ -664,7 +662,7 @@ static int handle_write_no_hash(struct dedup_config *dc,
 		/* LBN->PBN mappings exist */
 		r = __handle_has_lbn_pbn(dc, bio, lbn, hash, lbnpbn_value.pbn);
 	}
-	if (r == 0)
+	if (r == 0 && dc->enable_time_stats)
 		dc->uniqwrites++;
 	return r;
 }
@@ -803,6 +801,7 @@ out:
 static int check_collision(struct dedup_config *dc, u64 lpn, int oldno) {
 	//int i;
 	t_v tv;
+	u64 base = 0;
 	u64 num = dc->pblocks;
 	//u64 percent = 1;
 	u64 len = dc->remote_len;
@@ -811,12 +810,10 @@ static int check_collision(struct dedup_config *dc, u64 lpn, int oldno) {
 	if(len == 0) {
 		return (oldno != calculate_tarSSD(dc, lpn));
 	}
-	u64 base = lpn % len;
-	//base -= (base % 4);
-	//len = len / 4;
 	if(oldno == calculate_tarSSD(dc, lpn)) {
 		return 0;
 	}
+	base = calculate_entry_offset(dc, lpn);
 	while (base < num)
 	{
 		if(base == lpn) {
@@ -833,24 +830,6 @@ static int check_collision(struct dedup_config *dc, u64 lpn, int oldno) {
 		base += len;
 	}
 	return 0;
-	
-	/* while (base < num) {
-		cur = base;
-		for(i = 0; i < 4; ++i) {
-			if(cur == lpn) {
-            	cur += 1;
-            	continue;
-            }
-			val = dc->mdops->get_refcount(dc->bmd, base);
-			tv.type = (val & TV_TYPE) != 0;
-			tv.ver = (val & TV_VER);
-			if((tv.type) && (oldno == tv.ver))
-				return 1;
-			cur += 1;
-		}
-		base += len;
-	}
-	return 0; */
 }
 
 /*
@@ -872,58 +851,70 @@ static int handle_write_with_hash_xremap(struct dedup_config *dc, struct bio *bi
 	pbn_this = hashpbn_value_x.pbn;//lpn remap to
 	old_tv.type = hashpbn_value_x.tv.type;
 	old_tv.ver = hashpbn_value_x.tv.ver;
+	
 	ref = dc->mdops->get_refcount(dc->bmd, pbn_this);
 	cur_tv.type = (ref & TV_TYPE) != 0;
 	cur_tv.ver = (ref & TV_VER);
+	
 	ref = dc->mdops->get_refcount(dc->bmd, lbn);
 	lbn_tv.type = (ref & TV_TYPE) != 0;
 	lbn_tv.ver = (ref & TV_VER);
-	if (cur_tv.type == 1 || cur_tv.ver != old_tv.ver) {//指纹无效
-		/* No LBN->PBN mapping entry */
+	
+	if (cur_tv.type == 1 || cur_tv.ver != old_tv.ver) {//fp is invalid
 		//r = dc->kvs_hash_pbn->kvs_delete(dc->kvs_hash_pbn, (void *)final_hash, dc->crypto_key_size);
 		r = handle_write_no_hash_xremap(dc, bio, lbn, final_hash);
-		dc->hit_wrong_fp++;
+		if(dc->enable_time_stats)
+			dc->hit_wrong_fp++;
 	} else {
 		//Re-write the same data to the same pos
 		if(pbn_this == lbn) {
 			bio->bi_status = BLK_STS_OK;
 			bio_endio(bio);
-			dc->dupwrites++;
+			if (dc->enable_time_stats) {
+				dc->dupwrites++;
+				dc->hit_right_fp++;
+			}
 			return 0;
 		}
+		
 		cur_tv.type = 1;
 		cur_tv.ver = calculate_tarSSD(dc, pbn_this);
-		if(check_collision(dc, lbn, cur_tv.ver)){//发生冲突
+		if(check_collision(dc, lbn, cur_tv.ver)){//collision happen
 			//r = dc->kvs_hash_pbn->kvs_delete(dc->kvs_hash_pbn, (void *)final_hash, dc->crypto_key_size);
 			r = handle_write_no_hash_xremap(dc, bio, lbn, final_hash);
-			dc->hit_corrupt_fp++;
+			if(dc->enable_time_stats)
+				dc->hit_corrupt_fp++;
 			return r;
 		}
-		/* LBN->PBN mapping entry exists */
+
 		val = (cur_tv.type << TV_BIT) | cur_tv.ver;
 		r = dc->mdops->set_refcount(dc->bmd, lbn, val);
 		tmp = calculate_tarSSD(dc, lbn);
+		
 		calc_tsc(dc, PERIOD_IO, PERIOD_START);
-		if(lbn_tv.type == 0) {
-			if(lbn_tv.ver > 0 &&  tmp != cur_tv.ver){
+		if(lbn_tv.type == 0) { //the lbn writed an unique data
+			if(lbn_tv.ver > 0 &&  tmp != cur_tv.ver){// had data & updated to a different device
 				r = issue_discard(dc, lbn, tmp);
 			}
 			r = issue_remap(dc, pbn_this, lbn, tmp);
 		}
-		else {	
-			if(cur_tv.ver != lbn_tv.ver){
+		else {	// the lbn writed an duplicate data
+			if(cur_tv.ver != lbn_tv.ver){ // updated to a different device
 				lbn2 = remap_tarSSD(lbn, tmp, lbn_tv.ver);
 				r = issue_discard(dc, lbn2, tmp);
 			}
 			r = issue_remap(dc, pbn_this, lbn, lbn_tv.ver);
 		}
 		calc_tsc(dc, PERIOD_IO, PERIOD_END);
+		
 		if (r == 0) {
 			bio->bi_status = BLK_STS_OK;
 			bio_endio(bio);
-			dc->dupwrites++;
+			if (dc->enable_time_stats)
+				dc->dupwrites++;
 		}
-		dc->hit_right_fp++;
+		if(dc->enable_time_stats)
+			dc->hit_right_fp++;
 	}
 	
 	return r;
@@ -959,7 +950,7 @@ static int handle_write_with_hash(struct dedup_config *dc, struct bio *bio,
 		r = __handle_has_lbn_pbn_with_hash(dc, bio, lbn, pbn_this,
 						   lbnpbn_value);
 	}
-	if (r == 0)
+	if (r == 0 && dc->enable_time_stats)
 		dc->dupwrites++;
 	return r;
 }
@@ -1005,7 +996,7 @@ static int handle_write(struct dedup_config *dc, struct bio *bio)
 	if (r)
 		return r;
 	calc_tsc(dc, PERIOD_FP, PERIOD_START);
-	if (!strcmp(dc->backend_str, "xremap") || !strcmp(dc->backend_str, "pxremap"))
+	if (!strcmp(dc->backend_str, "xremap"))
 		r = dc->kvs_hash_pbn->kvs_lookup(dc->kvs_hash_pbn, hash,
 					 dc->crypto_key_size,
 					 &hashpbn_value_x, &vsize);
@@ -1017,15 +1008,16 @@ static int handle_write(struct dedup_config *dc, struct bio *bio)
 	dc->gc_needed = 0;
 
 	if (r == -ENODATA) {
-		dc->hit_none_fp++;
+		if(dc->enable_time_stats)
+			dc->hit_none_fp++;
 		dc->inserted_fp++;
-		if (!strcmp(dc->backend_str, "xremap") || !strcmp(dc->backend_str, "pxremap"))
+		if (!strcmp(dc->backend_str, "xremap"))
 			r = handle_write_no_hash_xremap(dc, bio, lbn, hash);
 		else
 			r = handle_write_no_hash(dc, bio, lbn, hash);
 	}
 	else if (r == 0) {
-		if (!strcmp(dc->backend_str, "xremap") || !strcmp(dc->backend_str, "pxremap"))
+		if (!strcmp(dc->backend_str, "xremap"))
 			r = handle_write_with_hash_xremap(dc, bio, lbn, hash,
 					   hashpbn_value_x);
 		else
@@ -1035,7 +1027,7 @@ static int handle_write(struct dedup_config *dc, struct bio *bio)
 	if (r < 0)
 		return r;
 
-	if (!strcmp(dc->backend_str, "xremap") || !strcmp(dc->backend_str, "pxremap")) {
+	if (!strcmp(dc->backend_str, "xremap")) {
 		if(dc->gc_needed || dc->inserted_fp >= dc->gc_threhold) {
 			r = garbage_collect(dc);
 			calc_tsc(dc, PERIOD_FUA, PERIOD_START);
@@ -1201,7 +1193,7 @@ static void process_bio(struct dedup_config *dc, struct bio *bio)
 		//    DMINFO("[bv_page=0x%p][bv_len=%u][bv_offset=%u]", bio->bi_io_vec[i].bv_page, bio->bi_io_vec[i].bv_len, bio->bi_io_vec[i].bv_offset);
 		//DMINFO("\n");
 		calc_tsc(dc, PERIOD_READ, PERIOD_START);
-		if (!strcmp(dc->backend_str, "xremap") || !strcmp(dc->backend_str, "pxremap")) {
+		if (!strcmp(dc->backend_str, "xremap")) {
 			r = handle_read_xremap(dc, bio);
 		}
 		else
@@ -1431,8 +1423,6 @@ static int parse_backend(struct dedup_args *da, struct dm_arg_set *as,
 		da->backend = BKND_COWBTREE;
 	} else if (!strcmp(backend, "xremap")) {
 		da->backend = BKND_XREMAP;
-	} else if (!strcmp(backend, "pxremap")) {
-		da->backend = BKND_PXREMAP;
 	} else if (!strcmp(backend, "hybrid")) {
 		da->backend = BKND_HYBRID;
 	} else {
@@ -1633,7 +1623,6 @@ static int dm_dedup_ctr(struct dm_target *ti, unsigned int argc, char **argv)
 	struct init_param_inram iparam_inram;
 	struct init_param_cowbtree iparam_cowbtree;
 	struct init_param_xremap iparam_xremap;
-	struct init_param_pxremap iparam_pxremap;
 	struct init_param_hybrid iparam_hybrid;
 	void *iparam = NULL;
 	struct metadata *md = NULL;
@@ -1734,12 +1723,6 @@ static int dm_dedup_ctr(struct dm_target *ti, unsigned int argc, char **argv)
 		iparam_xremap.metadata_bdev = da.meta_dev->bdev;
 		iparam = &iparam_xremap;
 		break;
-	case BKND_PXREMAP:
-		dc->mdops = &metadata_ops_pxremap;
-		iparam_pxremap.blocks = dc->pblocks;
-		iparam_pxremap.metadata_bdev = da.meta_dev->bdev;
-		iparam = &iparam_pxremap;
-		break;
 	case BKND_HYBRID:
 		dc->mdops = &metadata_ops_hybrid;
 		iparam_hybrid.blocks = dc->pblocks;
@@ -1768,7 +1751,6 @@ static int dm_dedup_ctr(struct dm_target *ti, unsigned int argc, char **argv)
 
 	switch (da.backend) {
 		case BKND_XREMAP:
-		case BKND_PXREMAP:
 			dc->kvs_hash_pbn = dc->mdops->kvs_create_sparse(md, crypto_key_size,
 				sizeof(struct hash_pbn_value_x),
 				dc->pblocks, unformatted, 0);
@@ -1965,11 +1947,7 @@ static void dm_dedup_status(struct dm_target *ti, status_type_t status_type,
 		data_used_block_count = dc->physical_block_counter;
 		data_actual_block_count = dc->logical_block_counter;
 		data_total_block_count = dc->pblocks;
-
-		data_free_block_count =
-			data_total_block_count - data_used_block_count;
-		
-		// cycles2us(dc);
+		data_free_block_count = data_total_block_count - data_used_block_count;	
 		dc->total_period_time[PERIOD_OTHER] = dc->total_period_time[PERIOD_WRITE] - dc->total_period_time[PERIOD_HASH];
 
 		DMEMIT("usr_total_cnt:%llu,usr_write_cnt:%llu,usr_reads_cnt:%llu,", dc->usr_total_cnt, dc->usr_write_cnt, dc->usr_reads_cnt);
@@ -1986,24 +1964,8 @@ static void dm_dedup_status(struct dm_target *ti, status_type_t status_type,
 		DMEMIT("gc_count:%llu,gc_fp_count:%llu,", dc->gc_count, dc->gc_fp_count);
 		DMEMIT("hit_right_fp:%llu,hit_wrong_fp:%llu,hit_corrupt_fp:%llu,hit_none_fp:%llu,",
 				dc->hit_right_fp, dc->hit_wrong_fp, dc->hit_corrupt_fp, dc->hit_none_fp);
-		DMEMIT("invalid_fp:%llu,inserted_fp:%llu", dc->invalid_fp, dc->inserted_fp);
-
-
-
-		/* DMEMIT("total_block:%llu,free_block:%llu used_block:%llu,actual_block:%llu,",
-		       data_total_block_count, data_free_block_count,
-			data_used_block_count, data_actual_block_count);
-
-		DMEMIT("%d %d:%d %d:%d ",
-		       dc->block_size,
-			MAJOR(dc->data_dev->bdev->bd_dev),
-			MINOR(dc->data_dev->bdev->bd_dev),
-			MAJOR(dc->metadata_dev->bdev->bd_dev),
-			MINOR(dc->metadata_dev->bdev->bd_dev));
-
-		DMEMIT("%llu %llu %llu %llu %llu %llu %llu",
-		       dc->writes, dc->uniqwrites, dc->dupwrites,
-			dc->reads_on_writes, dc->overwrites, dc->newwrites, dc->gc_counter); */
+		DMEMIT("invalid_fp:%llu,inserted_fp:%llu,", dc->invalid_fp, dc->inserted_fp);
+		DMEMIT("totalwrite:%llu,uniqwrites:%llu,dupwrites:%llu", dc->usr_write_cnt, dc->uniqwrites, dc->dupwrites);
 		break;
 	case STATUSTYPE_TABLE:
 		DMEMIT("%s %s %u %s %s %d",
@@ -2062,7 +2024,6 @@ out:
  * Returns -ERR code in failure.
  * Returns 0 on success.
  */
-#ifndef TV_MODE
 static int cleanup_hash_pbn_x(void *key, int32_t ksize, void *value,
 			    s32 vsize, void *data)
 {
@@ -2113,7 +2074,7 @@ static int reset_hash_pbn_x(void *key, int32_t ksize, void *value,
 	ref = dc->mdops->get_refcount(dc->bmd, pbn_val);
 	cur_tv.type = (ref & TV_TYPE) != 0;
 	cur_tv.ver = (ref & TV_VER);
-	if (cur_tv.type == 0 && cur_tv.ver  == old_tv.ver) {
+	if (cur_tv.type == 0 && cur_tv.ver != 1 && cur_tv.ver == old_tv.ver) {
 		dc->mdops->set_refcount(dc->bmd, pbn_val, 1);
 		hashpbn_value_x.tv.type = 0;
 		hashpbn_value_x.tv.ver = 1;
@@ -2124,44 +2085,6 @@ static int reset_hash_pbn_x(void *key, int32_t ksize, void *value,
 	return r;
 }
 
-#else
-static int cleanup_hash_pbn_x(void *key, int32_t ksize, void *value,
-			    s32 vsize, void *data)
-{
-	int r = 0, ref = 0;
-	u64 pbn_val = 0;
-	t_v old_tv, cur_tv;
-	struct hash_pbn_value_x hashpbn_value_x = *((struct hash_pbn_value_x *)value);
-	struct dedup_config *dc = (struct dedup_config *)data;
-
-	BUG_ON(!data);
-
-	pbn_val = hashpbn_value_x.pbn;
-	old_tv.type = hashpbn_value_x.tv.type;
-	old_tv.ver = hashpbn_value_x.tv.ver;
-	ref = dc->mdops->get_refcount(dc->bmd, pbn_val);
-	cur_tv.type = (ref & TV_TYPE) != 0;
-	cur_tv.ver = (ref & TV_VER);
-
-	if (cur_tv.type == 1 || cur_tv.ver  != old_tv.ver) {
-		r = dc->kvs_hash_pbn->kvs_delete(dc->kvs_hash_pbn,
-							key, ksize);
-		if (r < 0)
-			goto out;
-
-		dc->physical_block_counter -= 1;
-		dc->gc_counter++;
-		dc->gc_fp_count++;
-		dc->inserted_fp--;
-	} else {
-		DMINFO("KEY=%x", (*(uint64_t *)key));
-		printk(KERN_INFO "dc->kvs_hash_pbn = %x, dc->kvs_hash_pbn_tmp =  %x", dc->kvs_hash_pbn, dc->kvs_hash_pbn_tmp);
-		dc->kvs_hash_pbn_tmp->kvs_insert(dc->kvs_hash_pbn_tmp, key, ksize, value, vsize);
-	}
-out:
-	return r;
-}
-#endif
 /*
  * Performs garbage collection.
  * Iterates over all Hash->PBN entries and cleans up
@@ -2177,26 +2100,11 @@ static int garbage_collect(struct dedup_config *dc)
 	BUG_ON(!dc);
 
 	calc_tsc(dc, PERIOD_GC, PERIOD_START);
-	if (!strcmp(dc->backend_str, "xremap") || !strcmp(dc->backend_str, "pxremap")) {
-	
-	// #ifndef TV_MODE
-	// 	if (!dc->kvs_hash_pbn_tmp)
-	// 	dc->kvs_hash_pbn_tmp = dc->mdops->kvs_create_sparse(dc->bmd, dc->crypto_key_size,
-	// 			sizeof(struct hash_pbn_value_x),
-	// 			dc->pblocks, false, 1);
-	// #endif
+	if (!strcmp(dc->backend_str, "xremap")) {
 		err = dc->kvs_hash_pbn->kvs_iterate(dc->kvs_hash_pbn,
 			&cleanup_hash_pbn_x, (void *)dc);
 		err = dc->kvs_hash_pbn->kvs_iterate(dc->kvs_hash_pbn,
 			&reset_hash_pbn_x, (void *)dc);
-		
-	// #ifndef TV_MODE
-	// 	delete old hash_pbn btree & repalce the root node
-	// 	dc->mdops->change_hash_pbn_root(dc->bmd);
-	// 	dc->kvs_hash_pbn = dc->kvs_hash_pbn_tmp;
-	// 	dc->kvs_hash_pbn_tmp = NULL;
-	// #endif
-
 	}
 	else {
 	/* Cleanup hashes if the refcount of block == 1 */
@@ -2217,7 +2125,8 @@ static int garbage_collect(struct dedup_config *dc)
  */
 static int issue_discard(struct dedup_config *dc, u64 lpn, int id)
 {
-	u32 id1, id2;
+	u32 id1, id2, isremote;
+	u64 entry_offset;
 	int err = 0;
 	sector_t dev_start = lpn * 8, dev_end = 8;
 	id1 = calculate_tarSSD(dc, lpn);
@@ -2225,8 +2134,10 @@ static int issue_discard(struct dedup_config *dc, u64 lpn, int id)
 
 	BUG_ON(!dc);
 	//DMINFO("[LBN1=%lx][ID1=%d][ID2=%d]", dev_start, id1, id2);
+	entry_offset = calculate_entry_offset(dc, dev_start);
+	isremote = (id1 != id2) ? 1 : 0;
 	err = blkdev_issue_discard(dc->data_dev->bdev, dev_start,
-			dev_end, GFP_NOIO, 0, id1, id2);
+			dev_end, GFP_NOIO, 0, isremote, entry_offset);
 	if (err) {
 		DMERR("Error in issue discard: %d.", err);
 		return err;
@@ -2248,7 +2159,7 @@ static int issue_begin_end(struct dedup_config *dc, u64 lpn, int id)
 	err = blkdev_issue_discard(dc->data_dev->bdev, dev_start,
 			dev_end, GFP_NOIO, 0, id1, id2);
 	if (err) {
-		DMERR("Error in issue discard: %d.", err);
+		DMERR("Error in issue notice: %d.", err);
 		return err;
 	}
 	return 0;
@@ -2262,18 +2173,20 @@ static int issue_begin_end(struct dedup_config *dc, u64 lpn, int id)
  */
 static int issue_remap(struct dedup_config *dc, u64 lpn1, u64 lpn2, int last)
 {
-	u32 id1, id2;
+	u32 id1, id2, isremote, isupdate;
 	int err = 0;
 	
 	sector_t dev_start = lpn1 * 8, dev_end = 8, dev_s2 = lpn2 * 8;
+	u64 entry_offset = calculate_entry_offset(dc, dev_s2);
 	id1 = calculate_tarSSD(dc, lpn1);
 	id2 = calculate_tarSSD(dc, lpn2);
 
 	BUG_ON(!dc);
 
 	//DMINFO("[LBN1=%lx][LBN2=%lx][ID1=%d][ID2=%d][ID3=%d]", dev_start, dev_s2, id1, id2, last);
-	
-	err = blkdev_issue_remap(dc->data_dev->bdev, dev_start, dev_s2, id1, id2, last,
+	isremote = (id1 != id2) ? 1 : 0;
+	isupdate = (last != id2) ? 1 : 0;
+	err = blkdev_issue_remap(dc->data_dev->bdev, dev_start, dev_s2, isremote, entry_offset, last,
 		dev_end, GFP_NOIO, 0);
 	if (err) {
 		DMERR("Error in issue remap: %d.", err);
