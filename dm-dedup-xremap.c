@@ -1071,6 +1071,7 @@ static int kvs_iterate_sparse_xremap(struct kvstore *kvs,
 	char *entry, *key = NULL, *value = NULL;
 	int r = 0;
 	dm_block_t lowest, highest;
+	struct dedup_config *tdc = (struct dedup_config*)dc;
 
 	kvxremap = container_of(kvs, struct kvstore_xremap_sparse, ckvs);
 
@@ -1095,6 +1096,9 @@ static int kvs_iterate_sparse_xremap(struct kvstore *kvs,
 	if (r <= 0)
 		goto out;
 
+	if(tdc->gc_last_fp >= highest || tdc->gc_last_fp <= lowest)
+		tdc->gc_last_fp = lowest;
+	lowest = tdc->gc_last_fp;
 	while (lowest <= highest) {
 		/* Get the next entry entry in the kvs store */
 		r = dm_btree_lookup_next(&(kvxremap->info), kvxremap->root,
@@ -1114,10 +1118,16 @@ static int kvs_iterate_sparse_xremap(struct kvstore *kvs,
 		/* Call the cleanup callback function */
 		r = fn((void *)key, kvs->ksize, (void *)value,
 		       kvs->vsize, (void *)dc);
+		if (r == 1) {
+			tdc->gc_last_fp = lowest;
+			r = 0;
+			goto out;
+		}
 		if (r)
 			goto out;
 	}
-
+	tdc->gc_last_fp = 0;
+	
 out:
 	kfree(value);
 	kfree(key);

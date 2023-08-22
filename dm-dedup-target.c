@@ -1311,6 +1311,7 @@ struct dedup_args {
 
 	u64 ssd_num;
 	u64 collision_rate;
+	u64 gc_size;
 
 	bool corruption_flag;
 };
@@ -1510,7 +1511,7 @@ static int parse_ssd_num(struct dedup_args *da, struct dm_arg_set *as,
 }
 
 /*
- * Parses SSD number.
+ * Parses Collision Rate
  *
  * Returns -EINVAL in failure.
  * Returns 0 on success.
@@ -1528,6 +1529,24 @@ static int parse_collision_rate(struct dedup_args *da, struct dm_arg_set *as,
 }
 
 /*
+ * Parses Collision Rate
+ *
+ * Returns -EINVAL in failure.
+ * Returns 0 on success.
+ */
+static int parse_gc_size(struct dedup_args *da, struct dm_arg_set *as,
+			    char **err)
+{
+	u32 gc_size;
+	if (kstrtou32(dm_shift_arg(as), 10, &gc_size)) {
+		*err = "Invalid collision rate";
+		return -EINVAL;
+	}
+	da->gc_size = gc_size;
+	return 0;
+}
+
+/*
  * Wrapper function for all parse functions.
  *
  * Returns -ERR code in failure.
@@ -1539,12 +1558,12 @@ static int parse_dedup_args(struct dedup_args *da, int argc,
 	struct dm_arg_set as;
 	int r;
 
-	if (argc < 10) {
+	if (argc < 11) {
 		*err = "Insufficient args";
 		return -EINVAL;
 	}
 
-	if (argc > 10) {
+	if (argc > 11) {
 		*err = "Too many args";
 		return -EINVAL;
 	}
@@ -1589,6 +1608,10 @@ static int parse_dedup_args(struct dedup_args *da, int argc,
 		return r;
 
 	r = parse_collision_rate(da, &as, err);
+	if (r)
+		return r;
+
+	r = parse_gc_size(da, &as, err);
 	if (r)
 		return r;
 
@@ -1813,6 +1836,8 @@ static int dm_dedup_ctr(struct dm_target *ti, unsigned int argc, char **argv)
 	dc->newwrites = 0;
 	dc->gc_count = 0;
 	dc->gc_fp_count = 0;
+	dc->gc_cur_size = 0;
+	dc->gc_last_fp = 0;
 	dc->hit_none_fp = 0;
 	dc->hit_right_fp = 0;
 	dc->hit_wrong_fp = 0;
@@ -1827,6 +1852,7 @@ static int dm_dedup_ctr(struct dm_target *ti, unsigned int argc, char **argv)
 
 	dc->ssd_num = da.ssd_num;
 	dc->remote_len = dc->pblocks * da.collision_rate / (da.ssd_num * 100);
+	dc->gc_size = da.gc_size;
 
 	dc->enable_time_stats = 0;
 	for(i = 0; i < PREIOD_NUM; ++i) {
@@ -2006,6 +2032,9 @@ static int cleanup_hash_pbn(void *key, int32_t ksize, void *value,
 		dc->gc_counter++;
 		dc->gc_fp_count++;
 		dc->invalid_fp--;
+		dc->gc_cur_size++;
+		if (dc->gc_cur_size >= dc->gc_size)
+			r = 1;
 	}
 
 	goto out;
@@ -2052,29 +2081,11 @@ static int cleanup_hash_pbn_x(void *key, int32_t ksize, void *value,
 		dc->gc_counter++;
 		dc->gc_fp_count++;
 		dc->inserted_fp--;
+		dc->gc_cur_size++;
+		if (dc->gc_cur_size >= dc->gc_size)
+			r = 1;
 	}
-out:
-	return r;
-}
-
-static int reset_hash_pbn_x(void *key, int32_t ksize, void *value,
-			    s32 vsize, void *data)
-{
-	int r = 0, ref = 0;
-	u64 pbn_val = 0;
-	t_v old_tv, cur_tv;
-	struct hash_pbn_value_x hashpbn_value_x = *((struct hash_pbn_value_x *)value);
-	struct dedup_config *dc = (struct dedup_config *)data;
-
-	BUG_ON(!data);
-
-	pbn_val = hashpbn_value_x.pbn;
-	old_tv.type = hashpbn_value_x.tv.type;
-	old_tv.ver = hashpbn_value_x.tv.ver;
-	ref = dc->mdops->get_refcount(dc->bmd, pbn_val);
-	cur_tv.type = (ref & TV_TYPE) != 0;
-	cur_tv.ver = (ref & TV_VER);
-	if (cur_tv.type == 0 && cur_tv.ver != 1 && cur_tv.ver == old_tv.ver) {
+	else if (cur_tv.type == 0 && cur_tv.ver != 1 && cur_tv.ver == old_tv.ver) {
 		dc->mdops->set_refcount(dc->bmd, pbn_val, 1);
 		hashpbn_value_x.tv.type = 0;
 		hashpbn_value_x.tv.ver = 1;
@@ -2082,6 +2093,7 @@ static int reset_hash_pbn_x(void *key, int32_t ksize, void *value,
 		r = dc->kvs_hash_pbn->kvs_insert(dc->kvs_hash_pbn,
 							key, ksize, (void*)(&hashpbn_value_x), vsize);
 	}
+out:
 	return r;
 }
 
@@ -2099,12 +2111,11 @@ static int garbage_collect(struct dedup_config *dc)
 
 	BUG_ON(!dc);
 
+	dc->gc_cur_size = 0;
 	calc_tsc(dc, PERIOD_GC, PERIOD_START);
 	if (!strcmp(dc->backend_str, "xremap")) {
 		err = dc->kvs_hash_pbn->kvs_iterate(dc->kvs_hash_pbn,
 			&cleanup_hash_pbn_x, (void *)dc);
-		err = dc->kvs_hash_pbn->kvs_iterate(dc->kvs_hash_pbn,
-			&reset_hash_pbn_x, (void *)dc);
 	}
 	else {
 	/* Cleanup hashes if the refcount of block == 1 */
@@ -2113,6 +2124,7 @@ static int garbage_collect(struct dedup_config *dc)
 	}
 	dc->gc_count++;
 	calc_tsc(dc, PERIOD_GC, PERIOD_END);
+	dc->gc_cur_size = 0;
 	return err;
 }
 

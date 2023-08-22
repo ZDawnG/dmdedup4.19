@@ -103,6 +103,9 @@ struct dedup_config {
 	u64 gc_threhold;// num of the bound
 	u64 gc_type; 	// =0 percntage, =1 certain number
 	u64 gc_needed;  //equal true if the ver of lbn reached the max
+	u64 gc_size;
+	u64 gc_cur_size;
+	u64 gc_last_fp;
 	u64 usr_total_cnt;
 	u64 usr_write_cnt;
 	u64 usr_reads_cnt;

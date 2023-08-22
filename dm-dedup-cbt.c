@@ -966,6 +966,7 @@ static int kvs_iterate_sparse_cowbtree(struct kvstore *kvs,
 	char *entry, *key = NULL, *value = NULL;
 	int r = 0;
 	dm_block_t lowest, highest;
+	struct dedup_config *tdc = (struct dedup_config*)dc;
 
 	kvcbt = container_of(kvs, struct kvstore_cbt_sparse, ckvs);
 
@@ -990,6 +991,9 @@ static int kvs_iterate_sparse_cowbtree(struct kvstore *kvs,
 	if (r <= 0)
 		goto out;
 
+	if(tdc->gc_last_fp >= highest || tdc->gc_last_fp <= lowest)
+		tdc->gc_last_fp = lowest;
+	lowest = tdc->gc_last_fp;
 	while (lowest <= highest) {
 		/* Get the next entry entry in the kvs store */
 		r = dm_btree_lookup_next(&(kvcbt->info), kvcbt->root,
@@ -1009,10 +1013,14 @@ static int kvs_iterate_sparse_cowbtree(struct kvstore *kvs,
 		/* Call the cleanup callback function */
 		r = fn((void *)key, kvs->ksize, (void *)value,
 		       kvs->vsize, (void *)dc);
+		if (r == 1) {
+			tdc->gc_last_fp = lowest;
+		}
 		if (r)
 			goto out;
 	}
-
+	tdc->gc_last_fp = 0;
+	
 out:
 	kfree(value);
 	kfree(key);
