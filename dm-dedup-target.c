@@ -575,7 +575,9 @@ out:
 }
 
 static int issue_discard(struct dedup_config *dc, u64 lpn, int id);
+static void enqueue_issue_discard_work(struct dedup_config *dc, u64 lbn, int temp);
 static int issue_remap(struct dedup_config *dc, u64 lpn1, u64 lpn2, int last);
+static void enqueue_issue_remap_work(struct dedup_config *dc, u64 pbn_this, u64 lbn, int temp);
 
 /*
  * Handles write io when Hash->PBN entry is not found.
@@ -599,10 +601,8 @@ static int handle_write_no_hash_xremap(struct dedup_config *dc,
 		if(t != tv.ver) { // used mapped to another device
 			lbn2 = remap_tarSSD(lbn, t, tv.ver);
 			calc_tsc(dc, PERIOD_IO, PERIOD_START);
-			r = issue_discard(dc, lbn2, t);
+            enqueue_issue_discard_work(dc, lbn2, t);
 			calc_tsc(dc, PERIOD_IO, PERIOD_END);
-			if(r < 0)
-				return r;
 			bio->bi_iter.bi_ssdno = t;
 		}
 		r = dc->mdops->set_refcount(dc->bmd, lbn, 0);
@@ -894,25 +894,23 @@ static int handle_write_with_hash_xremap(struct dedup_config *dc, struct bio *bi
 		calc_tsc(dc, PERIOD_IO, PERIOD_START);
 		if(lbn_tv.type == 0) { //the lbn writed an unique data
 			if(lbn_tv.ver > 0 &&  tmp != cur_tv.ver){// had data & updated to a different device
-				r = issue_discard(dc, lbn, tmp);
+                enqueue_issue_discard_work(dc, lbn, tmp);
 			}
-			r = issue_remap(dc, pbn_this, lbn, tmp);
+            enqueue_issue_remap_work(dc, pbn_this, lbn, tmp);
 		}
 		else {	// the lbn writed an duplicate data
 			if(cur_tv.ver != lbn_tv.ver){ // updated to a different device
 				lbn2 = remap_tarSSD(lbn, tmp, lbn_tv.ver);
-				r = issue_discard(dc, lbn2, tmp);
+                enqueue_issue_discard_work(dc, lbn2, tmp);
 			}
-			r = issue_remap(dc, pbn_this, lbn, lbn_tv.ver);
+            enqueue_issue_remap_work(dc, pbn_this, lbn, tmp);
 		}
 		calc_tsc(dc, PERIOD_IO, PERIOD_END);
-		
-		if (r == 0) {
-			bio->bi_status = BLK_STS_OK;
-			bio_endio(bio);
-			if (dc->enable_time_stats)
-				dc->dupwrites++;
-		}
+	    
+        bio->bi_status = BLK_STS_OK;
+        bio_endio(bio);
+        if(dc->enable_time_stats)
+            dc->dupwrites++;
 		if(dc->enable_time_stats)
 			dc->hit_right_fp++;
 	}
@@ -1665,6 +1663,8 @@ static int dm_dedup_ctr(struct dm_target *ti, unsigned int argc, char **argv)
 	struct dedup_args da;
 	struct dedup_config *dc;
 	struct workqueue_struct *wq;
+    struct workqueue_struct *issue_remap_workqueue;
+    struct workqueue_struct *issue_discard_workqueue;
 
 	struct init_param_inram iparam_inram;
 	struct init_param_cowbtree iparam_cowbtree;
@@ -1684,6 +1684,8 @@ static int dm_dedup_ctr(struct dm_target *ti, unsigned int argc, char **argv)
 
 	mempool_t *dedup_work_pool = NULL;
 	mempool_t *check_work_pool = NULL;
+    mempool_t *issue_remap_work_pool = NULL;
+    mempool_t *issue_discard_work_pool = NULL;
 
 	bool unformatted;
 
@@ -1716,6 +1718,10 @@ static int dm_dedup_ctr(struct dm_target *ti, unsigned int argc, char **argv)
 		goto bad_bs;
 	}
 
+    issue_remap_workqueue = create_singlethread_workqueue("issue remap");
+
+    issue_discard_workqueue = create_singlethread_workqueue("issue discard");
+
 	dedup_work_pool = mempool_create_kmalloc_pool(MIN_DEDUP_WORK_IO,
 						      sizeof(struct dedup_work));
 	if (!dedup_work_pool) {
@@ -1723,6 +1729,12 @@ static int dm_dedup_ctr(struct dm_target *ti, unsigned int argc, char **argv)
 		r = -ENOMEM;
 		goto bad_dedup_mempool;
 	}
+
+    issue_remap_work_pool = mempool_create_kmalloc_pool(MIN_DEDUP_WORK_IO,
+                                sizeof(struct issue_remap_work));
+
+    issue_discard_work_pool = mempool_create_kmalloc_pool(MIN_DEDUP_WORK_IO,
+                                sizeof(struct issue_discard_work));
 
 	check_work_pool = mempool_create_kmalloc_pool(MIN_DEDUP_WORK_IO,
 						sizeof(struct check_work));
@@ -1844,8 +1856,12 @@ static int dm_dedup_ctr(struct dm_target *ti, unsigned int argc, char **argv)
 	dc->metadata_dev = da.meta_dev;
 
 	dc->workqueue = wq;
+    dc->issue_remap_workqueue = issue_remap_workqueue;
+    dc->issue_discard_workqueue = issue_discard_workqueue;
 	dc->dedup_work_pool = dedup_work_pool;
 	dc->check_work_pool = check_work_pool;
+    dc->issue_remap_work_pool = issue_remap_work_pool;
+    dc->issue_discard_work_pool = issue_discard_work_pool;
 	dc->bmd = md;
 
 	dc->logical_block_counter = logical_block_counter;
@@ -2152,6 +2168,25 @@ static int garbage_collect(struct dedup_config *dc)
 	return err;
 }
 
+static void do_issue_discard_work(struct work_struct *ws) {
+    struct issue_discard_work *work = container_of(ws, struct issue_discard_work, worker);
+    struct dedup_config *dc = (struct dedup_config *)work->dc;
+    mempool_free(work, dc->issue_discard_work_pool);
+    u64 lbn = (u64)work->lbn;
+    int temp = (int)work->temp;
+    issue_discard(dc, lbn, temp);
+}
+
+static void enqueue_issue_discard_work(struct dedup_config *dc, u64 lbn, int temp) {
+    struct issue_discard_work *work;
+    work = mempool_alloc(dc->issue_discard_work_pool, GFP_NOIO);
+    work->dc = dc;
+    work->lbn = lbn;
+    work->temp = temp;
+    INIT_WORK(&(work->worker), do_issue_discard_work);
+    queue_work(dc->issue_discard_workqueue, &(work->worker));
+}
+
 /*
  * Performs discard request.
  * Issue a discard request and submit it.
@@ -2200,6 +2235,28 @@ static int issue_begin_end(struct dedup_config *dc, u64 lpn, int id)
 	}
 	return 0;
 }
+
+static void do_issue_remap_work(struct work_struct *ws) {
+    struct issue_remap_work *work = container_of(ws, struct issue_remap_work, worker);
+    struct dedup_config *dc = (struct dedup_config *)work->dc;
+    mempool_free(work, dc->issue_remap_work_pool);
+    u64 pbn_this = (u64)work->pbn_this;
+    u64 lbn = (u64)work->lbn;
+    int temp = (int)work->temp;
+    issue_remap(dc, pbn_this, lbn, temp);
+}
+
+static void enqueue_issue_remap_work(struct dedup_config *dc, u64 pbn_this, u64 lbn, int temp) {
+    struct issue_remap_work *work;
+    work = mempool_alloc(dc->issue_remap_work_pool, GFP_NOIO);
+    work->dc = dc;
+    work->pbn_this = pbn_this;
+    work->lbn = lbn;
+    work->temp = temp;
+    INIT_WORK(&(work->worker), do_issue_remap_work);
+    queue_work(dc->issue_remap_workqueue, &(work->worker));
+}
+
 /*
  * Performs remap request.
  * Issue a remap request and submit it.
@@ -2260,6 +2317,7 @@ static uint64_t intStr2int(char* s, int len) {
     }
 	return x;
 }
+
 /*
  * Gives Debug messages for garbage collection.
  * Also, enables and disables corruption check and

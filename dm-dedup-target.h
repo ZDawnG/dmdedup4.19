@@ -84,6 +84,8 @@ struct dedup_config {
 	u32 lblocks;	/* logical blocks */
 
 	struct workqueue_struct *workqueue;
+    struct workqueue_struct *issue_remap_workqueue;
+    struct workqueue_struct *issue_discard_workqueue;
 
 	struct bio_set bs;
 	struct hash_desc_table *desc_table;
@@ -151,6 +153,9 @@ struct dedup_config {
 
 	mempool_t *dedup_work_pool;	/* Dedup work pool */
 	mempool_t *check_work_pool;	/* Corruption check work pool */
+
+    mempool_t *issue_remap_work_pool; /* issue remap work pool */
+    mempool_t *issue_discard_work_pool; /* issue discard work pool */
 };
 
 /* Value of the HASH-PBN key-value store */
@@ -180,6 +185,22 @@ struct hash_pbn_value_x {
 /* Value of the LBN-PBN key-value store */
 struct lbn_pbn_value {
 	u64 pbn;	/* in blocks */
+};
+
+/* pipeline work */
+struct issue_remap_work {
+    struct work_struct worker;
+    struct dedup_config *dc;
+    u64 pbn_this;
+    u64 lbn;
+    int temp;
+};
+
+struct issue_discard_work {
+    struct work_struct worker;
+    struct dedup_config *dc;
+    u64 lbn;
+    int temp;
 };
 
 #endif /* DM_DEDUP_H */
