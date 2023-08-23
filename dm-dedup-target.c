@@ -1312,6 +1312,7 @@ struct dedup_args {
 	u64 ssd_num;
 	u64 collision_rate;
 	u64 gc_size;
+	u64 raid_mode;
 
 	bool corruption_flag;
 };
@@ -1529,7 +1530,7 @@ static int parse_collision_rate(struct dedup_args *da, struct dm_arg_set *as,
 }
 
 /*
- * Parses Collision Rate
+ * Parses GC Size
  *
  * Returns -EINVAL in failure.
  * Returns 0 on success.
@@ -1547,6 +1548,24 @@ static int parse_gc_size(struct dedup_args *da, struct dm_arg_set *as,
 }
 
 /*
+ * Parses Raid Mode
+ *
+ * Returns -EINVAL in failure.
+ * Returns 0 on success.
+ */
+static int parse_raid_mode(struct dedup_args *da, struct dm_arg_set *as,
+			    char **err)
+{
+	u32 raid_mode;
+	if (kstrtou32(dm_shift_arg(as), 10, &raid_mode)) {
+		*err = "Invalid collision rate";
+		return -EINVAL;
+	}
+	da->raid_mode = raid_mode;
+	return 0;
+}
+
+/*
  * Wrapper function for all parse functions.
  *
  * Returns -ERR code in failure.
@@ -1558,12 +1577,12 @@ static int parse_dedup_args(struct dedup_args *da, int argc,
 	struct dm_arg_set as;
 	int r;
 
-	if (argc < 11) {
+	if (argc < 12) {
 		*err = "Insufficient args";
 		return -EINVAL;
 	}
 
-	if (argc > 11) {
+	if (argc > 12) {
 		*err = "Too many args";
 		return -EINVAL;
 	}
@@ -1612,6 +1631,10 @@ static int parse_dedup_args(struct dedup_args *da, int argc,
 		return r;
 
 	r = parse_gc_size(da, &as, err);
+	if (r)
+		return r;
+
+	r = parse_raid_mode(da, &as, err);
 	if (r)
 		return r;
 
@@ -1722,6 +1745,7 @@ static int dm_dedup_ctr(struct dm_target *ti, unsigned int argc, char **argv)
 	data_size = ti->len;
 	(void)sector_div(data_size, dc->sectors_per_block);
 	dc->lblocks = data_size;
+	dc->raid_mode = da.raid_mode;
 
 	data_size = i_size_read(da.data_dev->bdev->bd_inode) >> SECTOR_SHIFT;
 	(void)sector_div(data_size, dc->sectors_per_block);
