@@ -2170,8 +2170,14 @@ static int issue_discard(struct dedup_config *dc, u64 lpn, int id)
 
 	BUG_ON(!dc);
 	//DMINFO("[LBN1=%lx][ID1=%d][ID2=%d]", dev_start, id1, id2);
-	entry_offset = calculate_entry_offset(dc, dev_start);
-	isremote = (id1 != id2) ? 1 : 0;
+	if (!strcmp(dc->backend_str, "xremap")) {
+		entry_offset = calculate_entry_offset(dc, dev_start);
+		isremote = (id1 != id2) ? 1 : 0;
+	}
+	else {
+	 	entry_offset = 0;
+		isremote = 0;
+	}
 	err = blkdev_issue_discard(dc->data_dev->bdev, dev_start,
 			dev_end, GFP_NOIO, 0, isremote, entry_offset);
 	if (err) {
