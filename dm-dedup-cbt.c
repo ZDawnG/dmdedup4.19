@@ -1015,6 +1015,8 @@ static int kvs_iterate_sparse_cowbtree(struct kvstore *kvs,
 		       kvs->vsize, (void *)dc);
 		if (r == 1) {
 			tdc->gc_last_fp = lowest;
+			r = 0;
+			goto out;
 		}
 		if (r)
 			goto out;
