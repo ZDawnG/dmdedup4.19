@@ -17,6 +17,10 @@
 
 #include <linux/vmalloc.h>
 #include <linux/kdev_t.h>
+#include <linux/kernel.h>
+#include <linux/sched.h>
+#include <linux/sched/signal.h>
+#include <linux/pid.h>
 
 #include "dm-dedup-target.h"
 #include "dm-dedup-rw.h"
@@ -616,6 +620,7 @@ static int handle_write_no_hash_xremap(struct dedup_config *dc,
 			lbn2 = remap_tarSSD(lbn, t, tv.ver);
 			calc_tsc(dc, PERIOD_IO, PERIOD_START);
 			enqueue_discard_work(dc, lbn2, t);
+            /* issue_discard(dc, lbn2, t); */
 			calc_tsc(dc, PERIOD_IO, PERIOD_END);
 			bio->bi_iter.bi_ssdno = t;
 		}
@@ -909,15 +914,19 @@ static int handle_write_with_hash_xremap(struct dedup_config *dc, struct bio *bi
 		if(lbn_tv.type == 0) { //the lbn writed an unique data
 			if(lbn_tv.ver > 0 &&  tmp != cur_tv.ver){// had data & updated to a different device
 				enqueue_discard_work(dc, lbn, tmp);
+                /* issue_discard(dc, lbn, tmp); */
 			}
 			enqueue_remap_work(dc, pbn_this, lbn, tmp);
+            /* issue_remap(dc, pbn_this, lbn, tmp); */
 		}
 		else {	// the lbn writed an duplicate data
 			if(cur_tv.ver != lbn_tv.ver){ // updated to a different device
 				lbn2 = remap_tarSSD(lbn, tmp, lbn_tv.ver);
 				enqueue_discard_work(dc, lbn2, tmp);
+                /* issue_discard(dc, lbn2, tmp); */
 			}
 			enqueue_remap_work(dc, pbn_this, lbn, lbn_tv.ver);
+            /* issue_remap(dc, pbn_this, lbn, lbn_tv.ver); */
 		}
 		calc_tsc(dc, PERIOD_IO, PERIOD_END);
 		
@@ -1706,6 +1715,28 @@ static void destroy_dedup_args(struct dedup_args *da)
 		dm_put_device(da->ti, da->data_dev);
 }
 
+void set_wq_priority(char *wq_name, int nice_val) {
+    struct task_struct *task;
+    struct pid *kp;
+    int pid = 0;
+
+    for_each_process(task) {
+        if (strstr(task->comm, wq_name)) { // 查找工作队列的内核线程
+            pid = task->pid;
+            break;
+        }
+    }
+
+    if (pid) {
+        kp = find_get_pid(pid);
+        task = pid_task(kp, PIDTYPE_PID);
+        if (task) {
+            set_user_nice(task, nice_val);
+        }
+        put_pid(kp);
+    }
+}
+
 /*
  * Dmdedup constructor.
  *
@@ -1774,7 +1805,12 @@ static int dm_dedup_ctr(struct dm_target *ti, unsigned int argc, char **argv)
 
     remap_wq = create_singlethread_workqueue("dm-dedup-remap");
 
-    discard_wq = create_singlethread_workqueue("dm-dedup-discard");
+    /* discard_wq = create_singlethread_workqueue("dm-dedup-discard"); */
+    discard_wq = alloc_workqueue("dm-dedup-remap", WQ_UNBOUND | WQ_FREEZABLE, 1);
+
+    set_wq_priority("dm-dedup", -10);
+    set_wq_priority("dm-dedup-remap", 10);
+    set_wq_priority("dm-dedup-discard", 10);
 
 	dedup_work_pool = mempool_create_kmalloc_pool(MIN_DEDUP_WORK_IO,
 						      sizeof(struct dedup_work));
