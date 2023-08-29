@@ -1800,13 +1800,13 @@ static int dm_dedup_ctr(struct dm_target *ti, unsigned int argc, char **argv)
 
 	remap_wq = create_singlethread_workqueue("dm-dedup-remap");
 
-	discard_wq = create_singlethread_workqueue("dm-dedup-discard");
+	discard_wq = create_singlethread_workqueue("dm-dedup-trim");
 
 	set_wq_priority("dm-dedup", -20);
 
 	set_wq_priority("dm-dedup-remap", -10);
     
-	set_wq_priority("dm-dedup-discard", -10);
+	set_wq_priority("dm-dedup-trim", -10);
 
 	dedup_work_pool = mempool_create_kmalloc_pool(MIN_DEDUP_WORK_IO,
 						      sizeof(struct dedup_work));
