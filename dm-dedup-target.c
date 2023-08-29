@@ -17,6 +17,10 @@
 
 #include <linux/vmalloc.h>
 #include <linux/kdev_t.h>
+#include <linux/kernel.h>
+#include <linux/sched.h>
+#include <linux/sched/signal.h>
+#include <linux/pid.h>
 
 #include "dm-dedup-target.h"
 #include "dm-dedup-rw.h"
@@ -1706,6 +1710,28 @@ static void destroy_dedup_args(struct dedup_args *da)
 		dm_put_device(da->ti, da->data_dev);
 }
 
+void set_wq_priority(char *wq_name, int nice_val) {
+    struct task_struct *task;
+    struct pid *kp;
+    int pid = 0;
+
+    for_each_process(task) {
+        if (strstr(task->comm, wq_name)) { // 查找工作队列的内核线程
+            pid = task->pid;
+            break;
+        }
+    }
+
+    if (pid) {
+        kp = find_get_pid(pid);
+        task = pid_task(kp, PIDTYPE_PID);
+        if (task) {
+            set_user_nice(task, nice_val);
+        }
+        put_pid(kp);
+    }
+}
+
 /*
  * Dmdedup constructor.
  *
@@ -1772,9 +1798,15 @@ static int dm_dedup_ctr(struct dm_target *ti, unsigned int argc, char **argv)
 		goto bad_bs;
 	}
 
-    remap_wq = create_singlethread_workqueue("dm-dedup-remap");
+	remap_wq = create_singlethread_workqueue("dm-dedup-remap");
 
-    discard_wq = create_singlethread_workqueue("dm-dedup-discard");
+	discard_wq = create_singlethread_workqueue("dm-dedup-discard");
+
+	set_wq_priority("dm-dedup", -20);
+
+	set_wq_priority("dm-dedup-remap", -10);
+    
+	set_wq_priority("dm-dedup-discard", -10);
 
 	dedup_work_pool = mempool_create_kmalloc_pool(MIN_DEDUP_WORK_IO,
 						      sizeof(struct dedup_work));
@@ -2021,8 +2053,12 @@ static void dm_dedup_dtr(struct dm_target *ti)
 
 	flush_workqueue(dc->workqueue);
 	destroy_workqueue(dc->workqueue);
+	destroy_workqueue(dc->remap_workqueue);
+	destroy_workqueue(dc->discard_workqueue);
 
 	mempool_destroy(dc->dedup_work_pool);
+	mempool_destroy(dc->remap_work_pool);
+	mempool_destroy(dc->discard_work_pool);
 
 	dc->mdops->exit_meta(dc->bmd);
 
