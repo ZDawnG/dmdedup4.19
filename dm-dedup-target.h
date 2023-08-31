@@ -86,6 +86,7 @@ struct dedup_config {
 	struct workqueue_struct *workqueue;
     struct workqueue_struct *remap_workqueue;
     struct workqueue_struct *discard_workqueue;
+    	struct workqueue_struct *remap_or_discard_workqueue;
 
 	struct bio_set bs;
 	struct hash_desc_table *desc_table;
@@ -153,8 +154,13 @@ struct dedup_config {
 
 	mempool_t *dedup_work_pool;	/* Dedup work pool */
 	mempool_t *check_work_pool;	/* Corruption check work pool */
-    mempool_t *remap_work_pool; /* issue remap work pool */
-    mempool_t *discard_work_pool; /* issue discard work pool */
+    	mempool_t *remap_work_pool; /* issue remap work pool */
+    	mempool_t *discard_work_pool; /* issue discard work pool */
+	mempool_t *remap_or_discard_work_pool;
+
+	u64 remap_work_pool_counter;
+	u64 discard_work_pool_counter;
+	u64 rd_work_pool_counter;
 };
 
 /* Value of the HASH-PBN key-value store */
