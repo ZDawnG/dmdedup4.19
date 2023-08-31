@@ -1345,7 +1345,7 @@ static void do_remap_or_discard_work(struct work_struct *ws) {
 static void enqueue_remap_or_discard_work(struct dedup_config *config, u64 pbn, u64 lbn, int temp, int flag) {
     struct remap_or_discard_work *work;
     work = mempool_alloc(config->remap_or_discard_work_pool, GFP_NOIO);
-    //config->rd_work_pool_counter++;
+    config->rd_work_pool_counter++;
     work->config = config;
     work->pbn = pbn;
     work->lbn = lbn;
@@ -1362,7 +1362,7 @@ static void do_remap_work(struct work_struct *ws) {
     u64 lbn = (u64)work->lbn;
     int temp = (int)work->temp;
     mempool_free(work, config->remap_work_pool);
-    //config->remap_work_pool_counter--;
+    config->remap_work_pool_counter--;
     issue_remap(config, pbn_this, lbn, temp);
 }
 
@@ -1796,8 +1796,6 @@ static int dm_dedup_ctr(struct dm_target *ti, unsigned int argc, char **argv)
 	struct dedup_config *dc;
 	struct workqueue_struct *wq;
 	struct workqueue_struct *remap_or_discard_wq;
-	//struct workqueue_struct *remap_wq;
-    	//struct workqueue_struct *discard_wq;
 
 	struct init_param_inram iparam_inram;
 	struct init_param_cowbtree iparam_cowbtree;
@@ -1817,8 +1815,6 @@ static int dm_dedup_ctr(struct dm_target *ti, unsigned int argc, char **argv)
 
 	mempool_t *dedup_work_pool = NULL;
 	mempool_t *check_work_pool = NULL;
-	// mempool_t *remap_work_pool = NULL;
-    	// mempool_t *discard_work_pool = NULL;
 	mempool_t *remap_or_discard_work_pool = NULL;
 
 	bool unformatted;
@@ -1852,25 +1848,11 @@ static int dm_dedup_ctr(struct dm_target *ti, unsigned int argc, char **argv)
 		goto bad_bs;
 	}
 
-	//remap_or_discard_wq = alloc_workqueue("dm-dedup-remap_or_trim", WQ_UNBOUND | WQ_FREEZABLE, 4);
 	remap_or_discard_wq = create_singlethread_workqueue("dm-dedup-rd");
-
-	/*
-	remap_wq = create_singlethread_workqueue("dm-dedup-remap");
-	//remap_wq = alloc_workqueue("dm-dedup-remap", WQ_UNBOUND | WQ_FREEZABLE, 1);
-
-	discard_wq = create_singlethread_workqueue("dm-dedup-trim");
-	//discard_wq = alloc_workqueue("dm-dedup-trim", WQ_UNBOUND | WQ_FREEZABLE, 1);
-
-	set_wq_priority("dm-dedup", -20);
-
-	set_wq_priority("dm-dedup-remap", -10);
-    
-	set_wq_priority("dm-dedup-trim", -10);
-	*/
 
 	dedup_work_pool = mempool_create_kmalloc_pool(MIN_DEDUP_WORK_IO,
 						      sizeof(struct dedup_work));
+
 	if (!dedup_work_pool) {
 		ti->error = "failed to create dedup mempool";
 		r = -ENOMEM;
@@ -1879,22 +1861,15 @@ static int dm_dedup_ctr(struct dm_target *ti, unsigned int argc, char **argv)
 
 	check_work_pool = mempool_create_kmalloc_pool(MIN_DEDUP_WORK_IO,
 						sizeof(struct check_work));
+
+    remap_or_discard_work_pool = mempool_create_kmalloc_pool(65536,
+                        sizeof(struct remap_or_discard_work));
+
 	if (!check_work_pool) {
 		ti->error = "failed to create fec mempool";
 		r = -ENOMEM;
 		goto bad_check_mempool;
 	}
-
-	/*
-	remap_work_pool = mempool_create_kmalloc_pool(65536,
-                                sizeof(struct remap_work));
-
-    	discard_work_pool = mempool_create_kmalloc_pool(65536,
-                                sizeof(struct discard_work));
-	*/
-
-        remap_or_discard_work_pool = mempool_create_kmalloc_pool(65536,
-                                sizeof(struct remap_or_discard_work));
 
 	dc->io_client = dm_io_client_create();
 	if (IS_ERR(dc->io_client)) {
@@ -2130,13 +2105,12 @@ static void dm_dedup_dtr(struct dm_target *ti)
 		DMERR("Failed to flush the metadata to disk.");
 
 	flush_workqueue(dc->workqueue);
+    flush_workqueue(dc->remap_or_discard_workqueue);
 	destroy_workqueue(dc->workqueue);
-	destroy_workqueue(dc->remap_workqueue);
-	destroy_workqueue(dc->discard_workqueue);
+    destroy_workqueue(dc->remap_or_discard_workqueue);
 
 	mempool_destroy(dc->dedup_work_pool);
-	mempool_destroy(dc->remap_work_pool);
-	mempool_destroy(dc->discard_work_pool);
+    mempool_destroy(dc->remap_or_discard_work_pool);
 
 	dc->mdops->exit_meta(dc->bmd);
 
