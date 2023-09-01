@@ -21,6 +21,8 @@
 #include <linux/sched.h>
 #include <linux/sched/signal.h>
 #include <linux/pid.h>
+#include <linux/kthread.h>
+#include <linux/mutex.h>
 
 #include "dm-dedup-target.h"
 #include "dm-dedup-rw.h"
@@ -167,6 +169,57 @@ struct dm_buffer {
 	unsigned long stack_entries[MAX_STACK];
 #endif
 };
+
+struct rd_work {
+    struct dedup_config *config;
+    u64 pbn;
+    u64 lbn;
+    int temp;
+    int flag;
+};
+
+struct rd_queue {
+    int front, rear;
+    struct rd_work data[10000];
+};
+
+struct mutex queue_lock;
+
+struct rd_queue rd_queue;
+
+static void init_queue(void) {
+    rd_queue.front = 0;
+    rd_queue.rear = 0;
+}
+
+static bool queue_is_empty(void) {
+    /* return (rd_queue.front == rd_queue.rear); */
+    bool ret;
+    mutex_lock(&queue_lock);
+    ret = (rd_queue.front == rd_queue.rear);
+    mutex_unlock(&queue_lock);
+    return ret;
+}
+
+static void queue_push(struct dedup_config *config, u64 pbn, u64 lbn, int temp, int flag) {
+    rd_queue.data[rd_queue.rear].config = config;
+    rd_queue.data[rd_queue.rear].pbn = pbn;
+    rd_queue.data[rd_queue.rear].lbn = lbn;
+    rd_queue.data[rd_queue.rear].temp = temp;
+    rd_queue.data[rd_queue.rear].flag = flag;
+    mutex_lock(&queue_lock);
+    rd_queue.rear = (rd_queue.rear + 1) % 10000;
+    mutex_unlock(&queue_lock);
+}
+
+static struct rd_work queue_pop(void) {
+    struct rd_work rd_work;
+    rd_work = rd_queue.data[rd_queue.front];
+    mutex_lock(&queue_lock);
+    rd_queue.front = (rd_queue.front + 1) % 10000;
+    mutex_unlock(&queue_lock);
+    return rd_work;
+}
 
 static inline unsigned long read_tsc(void) {
     unsigned long var;
@@ -629,7 +682,8 @@ static int handle_write_no_hash_xremap(struct dedup_config *dc,
 		if(t != tv.ver) { // used mapped to another device
 			lbn2 = remap_tarSSD(lbn, t, tv.ver);
 			calc_tsc(dc, PERIOD_IO, PERIOD_START);
-			enqueue_remap_or_discard_work(dc, 0, lbn2, t, 0);
+            queue_push(dc, 0, lbn2, t, 0);
+			/* enqueue_remap_or_discard_work(dc, 0, lbn2, t, 0); */
 			//enqueue_discard_work(dc, lbn2, t);
 			//issue_discard(dc, lbn2, t);
 			calc_tsc(dc, PERIOD_IO, PERIOD_END);
@@ -924,22 +978,26 @@ static int handle_write_with_hash_xremap(struct dedup_config *dc, struct bio *bi
 		calc_tsc(dc, PERIOD_IO, PERIOD_START);
 		if(lbn_tv.type == 0) { //the lbn writed an unique data
 			if(lbn_tv.ver > 0 &&  tmp != cur_tv.ver){// had data & updated to a different device
-				enqueue_remap_or_discard_work(dc, 0, lbn, tmp, 0);
+                queue_push(dc, 0, lbn, tmp, 0);
+				/* enqueue_remap_or_discard_work(dc, 0, lbn, tmp, 0); */
 				//enqueue_discard_work(dc, lbn, tmp);
 				//issue_discard(dc, lbn, tmp);
 			}
-			enqueue_remap_or_discard_work(dc, pbn_this, lbn, tmp, 1);
+            queue_push(dc, pbn_this, lbn, tmp, 1);
+			/* enqueue_remap_or_discard_work(dc, pbn_this, lbn, tmp, 1); */
 			//enqueue_remap_work(dc, pbn_this, lbn, tmp);
 			//issue_remap(dc, pbn_this, lbn, tmp);
 		}
 		else {	// the lbn writed an duplicate data
 			if(cur_tv.ver != lbn_tv.ver){ // updated to a different device
 				lbn2 = remap_tarSSD(lbn, tmp, lbn_tv.ver);
-				enqueue_remap_or_discard_work(dc, 0, lbn2, tmp, 0);
+                queue_push(dc, 0, lbn2, tmp, 0);
+				/* enqueue_remap_or_discard_work(dc, 0, lbn2, tmp, 0); */
 				//enqueue_discard_work(dc, lbn2, tmp);
 				//issue_discard(dc, lbn, tmp);
 			}
-			enqueue_remap_or_discard_work(dc, pbn_this, lbn, lbn_tv.ver, 1);
+            queue_push(dc, pbn_this, lbn, lbn_tv.ver, 1);
+			/* enqueue_remap_or_discard_work(dc, pbn_this, lbn, lbn_tv.ver, 1); */
 			//enqueue_remap_work(dc, pbn_this, lbn, lbn_tv.ver);
 			//issue_remap(dc, pbn_this, lbn, lbn_tv.ver);
 		}
@@ -1325,6 +1383,24 @@ static int dm_dedup_map(struct dm_target *ti, struct bio *bio)
 	dedup_defer_bio(ti->private, bio);
 
 	return DM_MAPIO_SUBMITTED;
+}
+
+static int handle_rd_request(void * para) {
+    while(!kthread_should_stop()) {
+        if(!queue_is_empty()) {
+            struct rd_work rd_work;
+            rd_work = queue_pop();
+            if(rd_work.flag)
+                issue_remap(rd_work.config, rd_work.pbn, rd_work.lbn, rd_work.temp);
+            else 
+                issue_discard(rd_work.config, rd_work.lbn, rd_work.temp);
+        }
+        else {
+            msleep(100);
+            cond_resched();
+        }
+    }
+    return 0;
 }
 
 static void do_remap_or_discard_work(struct work_struct *ws) {
@@ -1848,7 +1924,10 @@ static int dm_dedup_ctr(struct dm_target *ti, unsigned int argc, char **argv)
 		goto bad_bs;
 	}
 
-	remap_or_discard_wq = create_singlethread_workqueue("dm-dedup-rd");
+    mutex_init(&queue_lock);
+
+	/* remap_or_discard_wq = create_singlethread_workqueue("dm-dedup-rd"); */
+    dc->rd = kthread_run(handle_rd_request, NULL, "dm-dedup-rd");
 
 	dedup_work_pool = mempool_create_kmalloc_pool(MIN_DEDUP_WORK_IO,
 						      sizeof(struct dedup_work));
@@ -1862,8 +1941,8 @@ static int dm_dedup_ctr(struct dm_target *ti, unsigned int argc, char **argv)
 	check_work_pool = mempool_create_kmalloc_pool(MIN_DEDUP_WORK_IO,
 						sizeof(struct check_work));
 
-    remap_or_discard_work_pool = mempool_create_kmalloc_pool(65536,
-                        sizeof(struct remap_or_discard_work));
+    /* remap_or_discard_work_pool = mempool_create_kmalloc_pool(65536, */
+    /*                     sizeof(struct remap_or_discard_work)); */
 
 	if (!check_work_pool) {
 		ti->error = "failed to create fec mempool";
@@ -2105,12 +2184,13 @@ static void dm_dedup_dtr(struct dm_target *ti)
 		DMERR("Failed to flush the metadata to disk.");
 
 	flush_workqueue(dc->workqueue);
-    flush_workqueue(dc->remap_or_discard_workqueue);
+    /* flush_workqueue(dc->remap_or_discard_workqueue); */
 	destroy_workqueue(dc->workqueue);
-    destroy_workqueue(dc->remap_or_discard_workqueue);
+    /* destroy_workqueue(dc->remap_or_discard_workqueue); */
+    kthread_stop(dc->rd);
 
 	mempool_destroy(dc->dedup_work_pool);
-    mempool_destroy(dc->remap_or_discard_work_pool);
+    /* mempool_destroy(dc->remap_or_discard_work_pool); */
 
 	dc->mdops->exit_meta(dc->bmd);
 

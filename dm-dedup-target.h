@@ -40,6 +40,7 @@
 #include <crypto/md5.h>
 #include <crypto/sha.h>
 #include <crypto/algapi.h>
+#include <linux/kthread.h>
 
 #define DM_MSG_PREFIX "dedup-mod"
 
@@ -87,6 +88,7 @@ struct dedup_config {
     struct workqueue_struct *remap_workqueue;
     struct workqueue_struct *discard_workqueue;
     	struct workqueue_struct *remap_or_discard_workqueue;
+    struct task_struct *rd;
 
 	struct bio_set bs;
 	struct hash_desc_table *desc_table;
