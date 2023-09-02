@@ -657,9 +657,6 @@ out:
 
 static int issue_discard(struct dedup_config *dc, u64 lpn, int id);
 static int issue_remap(struct dedup_config *dc, u64 lpn1, u64 lpn2, int last);
-static void enqueue_discard_work(struct dedup_config *config, u64 lbn, int temp);
-static void enqueue_remap_work(struct dedup_config *config, u64 pbn_this, u64 lbn, int temp);
-static void enqueue_remap_or_discard_work(struct dedup_config *config, u64 pbn, u64 lbn, int temp, int flag);
 /*
  * Handles write io when Hash->PBN entry is not found.
  *
@@ -683,9 +680,6 @@ static int handle_write_no_hash_xremap(struct dedup_config *dc,
 			lbn2 = remap_tarSSD(lbn, t, tv.ver);
 			calc_tsc(dc, PERIOD_IO, PERIOD_START);
             queue_push(dc, 0, lbn2, t, 0);
-			/* enqueue_remap_or_discard_work(dc, 0, lbn2, t, 0); */
-			//enqueue_discard_work(dc, lbn2, t);
-			//issue_discard(dc, lbn2, t);
 			calc_tsc(dc, PERIOD_IO, PERIOD_END);
 			bio->bi_iter.bi_ssdno = t;
 		}
@@ -979,27 +973,15 @@ static int handle_write_with_hash_xremap(struct dedup_config *dc, struct bio *bi
 		if(lbn_tv.type == 0) { //the lbn writed an unique data
 			if(lbn_tv.ver > 0 &&  tmp != cur_tv.ver){// had data & updated to a different device
                 queue_push(dc, 0, lbn, tmp, 0);
-				/* enqueue_remap_or_discard_work(dc, 0, lbn, tmp, 0); */
-				//enqueue_discard_work(dc, lbn, tmp);
-				//issue_discard(dc, lbn, tmp);
 			}
             queue_push(dc, pbn_this, lbn, tmp, 1);
-			/* enqueue_remap_or_discard_work(dc, pbn_this, lbn, tmp, 1); */
-			//enqueue_remap_work(dc, pbn_this, lbn, tmp);
-			//issue_remap(dc, pbn_this, lbn, tmp);
 		}
 		else {	// the lbn writed an duplicate data
 			if(cur_tv.ver != lbn_tv.ver){ // updated to a different device
 				lbn2 = remap_tarSSD(lbn, tmp, lbn_tv.ver);
                 queue_push(dc, 0, lbn2, tmp, 0);
-				/* enqueue_remap_or_discard_work(dc, 0, lbn2, tmp, 0); */
-				//enqueue_discard_work(dc, lbn2, tmp);
-				//issue_discard(dc, lbn, tmp);
 			}
             queue_push(dc, pbn_this, lbn, lbn_tv.ver, 1);
-			/* enqueue_remap_or_discard_work(dc, pbn_this, lbn, lbn_tv.ver, 1); */
-			//enqueue_remap_work(dc, pbn_this, lbn, lbn_tv.ver);
-			//issue_remap(dc, pbn_this, lbn, lbn_tv.ver);
 		}
 		calc_tsc(dc, PERIOD_IO, PERIOD_END);
 		
@@ -1403,78 +1385,6 @@ static int handle_rd_request(void * para) {
     return 0;
 }
 
-static void do_remap_or_discard_work(struct work_struct *ws) {
-    struct remap_or_discard_work *work = container_of(ws, struct remap_or_discard_work, worker);
-    struct dedup_config *config = (struct dedup_config *)work->config;
-    u64 pbn = (u64)work->pbn;
-    u64 lbn = (u64)work->lbn;
-    int temp = (int)work->temp;
-    int flag = (int)work->flag;
-    mempool_free(work, config->remap_or_discard_work_pool);
-    config->rd_work_pool_counter--;
-    if(flag)
-	issue_remap(config, pbn, lbn, temp);
-    else
-	issue_discard(config, lbn, temp);
-}
-
-static void enqueue_remap_or_discard_work(struct dedup_config *config, u64 pbn, u64 lbn, int temp, int flag) {
-    struct remap_or_discard_work *work;
-    work = mempool_alloc(config->remap_or_discard_work_pool, GFP_NOIO);
-    config->rd_work_pool_counter++;
-    work->config = config;
-    work->pbn = pbn;
-    work->lbn = lbn;
-    work->temp = temp;
-    work->flag = flag;
-    INIT_WORK(&(work->worker), do_remap_or_discard_work);
-    queue_work(config->remap_or_discard_workqueue, &(work->worker));
-}
-
-static void do_remap_work(struct work_struct *ws) {
-    struct remap_work *work = container_of(ws, struct remap_work, worker);
-    struct dedup_config *config = (struct dedup_config *)work->config;
-    u64 pbn_this = (u64)work->pbn_this;
-    u64 lbn = (u64)work->lbn;
-    int temp = (int)work->temp;
-    mempool_free(work, config->remap_work_pool);
-    config->remap_work_pool_counter--;
-    issue_remap(config, pbn_this, lbn, temp);
-}
-
-static void enqueue_remap_work(struct dedup_config *config, u64 pbn_this, u64 lbn, int temp) {
-    struct remap_work *work;
-    work = mempool_alloc(config->remap_work_pool, GFP_NOIO);
-    config->remap_work_pool_counter++;
-    work->config = config;
-    work->pbn_this = pbn_this;
-    work->lbn = lbn;
-    work->temp = temp;
-    INIT_WORK(&(work->worker), do_remap_work);
-    queue_work(config->remap_workqueue, &(work->worker));
-}
-
-static void do_discard_work(struct work_struct *ws) {
-    struct discard_work *work = container_of(ws, struct discard_work, worker);
-    struct dedup_config *config = (struct dedup_config *)work->config;
-    u64 lbn = (u64)work->lbn;
-    int temp = (int)work->temp;
-    mempool_free(work, config->discard_work_pool);
-    config->discard_work_pool_counter--;
-    issue_discard(config, lbn, temp);
-}
-
-static void enqueue_discard_work(struct dedup_config *config, u64 lbn, int temp) {
-    struct discard_work *work;
-    work = mempool_alloc(config->discard_work_pool, GFP_NOIO);
-    config->discard_work_pool_counter++;
-    work->config = config;
-    work->lbn = lbn;
-    work->temp = temp;
-    INIT_WORK(&(work->worker), do_discard_work);
-    queue_work(config->discard_workqueue, &(work->worker));
-}
-
 struct dedup_args {
 	struct dm_target *ti;
 
@@ -1871,7 +1781,6 @@ static int dm_dedup_ctr(struct dm_target *ti, unsigned int argc, char **argv)
 	struct dedup_args da;
 	struct dedup_config *dc;
 	struct workqueue_struct *wq;
-	struct workqueue_struct *remap_or_discard_wq;
 
 	struct init_param_inram iparam_inram;
 	struct init_param_cowbtree iparam_cowbtree;
@@ -1891,7 +1800,6 @@ static int dm_dedup_ctr(struct dm_target *ti, unsigned int argc, char **argv)
 
 	mempool_t *dedup_work_pool = NULL;
 	mempool_t *check_work_pool = NULL;
-	mempool_t *remap_or_discard_work_pool = NULL;
 
 	bool unformatted;
 
@@ -1925,8 +1833,8 @@ static int dm_dedup_ctr(struct dm_target *ti, unsigned int argc, char **argv)
 	}
 
     mutex_init(&queue_lock);
+    init_queue();
 
-	/* remap_or_discard_wq = create_singlethread_workqueue("dm-dedup-rd"); */
     dc->rd = kthread_run(handle_rd_request, NULL, "dm-dedup-rd");
 
 	dedup_work_pool = mempool_create_kmalloc_pool(MIN_DEDUP_WORK_IO,
@@ -1940,9 +1848,6 @@ static int dm_dedup_ctr(struct dm_target *ti, unsigned int argc, char **argv)
 
 	check_work_pool = mempool_create_kmalloc_pool(MIN_DEDUP_WORK_IO,
 						sizeof(struct check_work));
-
-    /* remap_or_discard_work_pool = mempool_create_kmalloc_pool(65536, */
-    /*                     sizeof(struct remap_or_discard_work)); */
 
 	if (!check_work_pool) {
 		ti->error = "failed to create fec mempool";
@@ -2062,22 +1967,8 @@ static int dm_dedup_ctr(struct dm_target *ti, unsigned int argc, char **argv)
 	dc->metadata_dev = da.meta_dev;
 
 	dc->workqueue = wq;
-	/*
-	dc->remap_workqueue = remap_wq;
-	dc->discard_workqueue = discard_wq;
-	*/
-	dc->remap_or_discard_workqueue = remap_or_discard_wq;
 	dc->dedup_work_pool = dedup_work_pool;
 	dc->check_work_pool = check_work_pool;
-	/*
-	dc->remap_work_pool = remap_work_pool;
-	dc->discard_work_pool = discard_work_pool;
-	*/
-	dc->remap_or_discard_work_pool = remap_or_discard_work_pool;
-	dc->remap_work_pool_counter = 0;
-	dc->discard_work_pool_counter = 0;
-	dc->rd_work_pool_counter = 0;
-
 
 	dc->bmd = md;
 
@@ -2184,13 +2075,10 @@ static void dm_dedup_dtr(struct dm_target *ti)
 		DMERR("Failed to flush the metadata to disk.");
 
 	flush_workqueue(dc->workqueue);
-    /* flush_workqueue(dc->remap_or_discard_workqueue); */
 	destroy_workqueue(dc->workqueue);
-    /* destroy_workqueue(dc->remap_or_discard_workqueue); */
     kthread_stop(dc->rd);
 
 	mempool_destroy(dc->dedup_work_pool);
-    /* mempool_destroy(dc->remap_or_discard_work_pool); */
 
 	dc->mdops->exit_meta(dc->bmd);
 
@@ -2253,7 +2141,6 @@ static void dm_dedup_status(struct dm_target *ti, status_type_t status_type,
 				dc->hit_right_fp, dc->hit_wrong_fp, dc->hit_corrupt_fp, dc->hit_none_fp);
 		DMEMIT("invalid_fp:%llu,inserted_fp:%llu,", dc->invalid_fp, dc->inserted_fp);
 		DMEMIT("totalwrite:%llu,uniqwrites:%llu,dupwrites:%llu,", dc->usr_write_cnt, dc->uniqwrites, dc->dupwrites);
-		DMEMIT("remap_or_discard_cnt:%llu", dc->rd_work_pool_counter);
 		break;
 	case STATUSTYPE_TABLE:
 		DMEMIT("%s %s %u %s %s %d",
