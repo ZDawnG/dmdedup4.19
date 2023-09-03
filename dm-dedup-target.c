@@ -73,21 +73,6 @@ struct dedup_work {
 	struct bio *bio;
 };
 
-struct remap_work {
-    struct work_struct worker;
-    struct dedup_config *config;
-    u64 pbn_this;
-    u64 lbn;
-    int temp;
-};
-
-struct discard_work {
-    struct work_struct worker;
-    struct dedup_config *config;
-    u64 lbn;
-    int temp;
-};
-
 struct remap_or_discard_work {
     struct work_struct worker;
     struct dedup_config *config;
@@ -2140,7 +2125,7 @@ static void dm_dedup_status(struct dm_target *ti, status_type_t status_type,
 		DMEMIT("hit_right_fp:%llu,hit_wrong_fp:%llu,hit_corrupt_fp:%llu,hit_none_fp:%llu,",
 				dc->hit_right_fp, dc->hit_wrong_fp, dc->hit_corrupt_fp, dc->hit_none_fp);
 		DMEMIT("invalid_fp:%llu,inserted_fp:%llu,", dc->invalid_fp, dc->inserted_fp);
-		DMEMIT("totalwrite:%llu,uniqwrites:%llu,dupwrites:%llu,", dc->usr_write_cnt, dc->uniqwrites, dc->dupwrites);
+		DMEMIT("totalwrite:%llu,uniqwrites:%llu,dupwrites:%llu", dc->usr_write_cnt, dc->uniqwrites, dc->dupwrites);
 		break;
 	case STATUSTYPE_TABLE:
 		DMEMIT("%s %s %u %s %s %d",
