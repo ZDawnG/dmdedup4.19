@@ -877,6 +877,14 @@ static int check_collision(struct dedup_config *dc, u64 lpn, int oldno) {
 		return 0;
 	}
 	base = calculate_entry_offset(dc, lpn);
+	if (dc->raid_mode) {
+		int pd_idx, raid_disk;
+		raid_disk = dc->ssd_num;
+		pd_idx = (raid_disk - 1) - (base % raid_disk);
+		if (pd_idx == oldno) {
+			return 1;
+		}
+	}
 	while (base < num)
 	{
 		if(base == lpn) {
