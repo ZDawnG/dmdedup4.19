@@ -1862,6 +1862,7 @@ static int dm_dedup_ctr(struct dm_target *ti, unsigned int argc, char **argv)
 	(void)sector_div(data_size, dc->sectors_per_block);
 	dc->lblocks = data_size;
 	dc->raid_mode = da.raid_mode;
+	dc->raid_id = (dc->raid_mode) ? -2 : -1;
 
 	data_size = i_size_read(da.data_dev->bdev->bd_inode) >> SECTOR_SHIFT;
 	(void)sector_div(data_size, dc->sectors_per_block);
@@ -2022,7 +2023,7 @@ static int dm_dedup_ctr(struct dm_target *ti, unsigned int argc, char **argv)
 	ti->num_discard_bios = 1;
 	ti->private = dc;
 	for(i = 0; i < dc->ssd_num; ++i) {
-		blkdev_issue_discard(dc->data_dev->bdev, i*8, 8, GFP_NOIO, 0, -1, dc->remote_len);
+		blkdev_issue_discard(dc->data_dev->bdev, i*8, 8, GFP_NOIO, 0, dc->raid_id, dc->remote_len);
 	}
 	return 0;
 
@@ -2223,9 +2224,6 @@ static int cleanup_hash_pbn_x(void *key, int32_t ksize, void *value,
 		dc->gc_counter++;
 		dc->gc_fp_count++;
 		dc->inserted_fp--;
-		dc->gc_cur_size++;
-		if (dc->gc_cur_size >= dc->gc_size)
-			r = 1;
 	}
 	else if (cur_tv.type == 0 && cur_tv.ver != 1 && cur_tv.ver == old_tv.ver) {
 		dc->mdops->set_refcount(dc->bmd, pbn_val, 1);
@@ -2311,7 +2309,7 @@ static int issue_begin_end(struct dedup_config *dc, u64 lpn, int id)
 	u32 id1, id2;
 	int err = 0;
 	sector_t dev_start = lpn * 8, dev_end = 8;
-	id1 = -1;
+	id1 = dc->raid_id;
 	id2 = id;
 
 	BUG_ON(!dc);

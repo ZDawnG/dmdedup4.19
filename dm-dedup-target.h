@@ -120,6 +120,7 @@ struct dedup_config {
 	u64 invalid_fp;
 	u64 inserted_fp;
 
+	int raid_id;
 	u64 raid_mode;
 	u64 remote_len;
 	u64 ssd_num;
