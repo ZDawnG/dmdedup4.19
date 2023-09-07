@@ -672,14 +672,15 @@ static int handle_write_no_hash_xremap(struct dedup_config *dc,
 		r = dc->mdops->set_refcount(dc->bmd, lbn, 0);
 	}
 
-	r = dc->mdops->inc_refcount(dc->bmd, lbn);
+	if(tv.type == 0 && tv.ver < TV_MAX)
+		r = dc->mdops->inc_refcount(dc->bmd, lbn);
 	r = dc->mdops->get_refcount(dc->bmd, lbn);
 	tv.type = (r & TV_TYPE) != 0;
 	tv.ver = (r & TV_VER);
 
-	if(tv.ver >= TV_MAX) {
+	/*if(tv.ver >= TV_MAX) {
 		dc->gc_needed = 1;
-	}
+	}*/
 	
 	hashpbn_value_x.tv.type = tv.type;
 	hashpbn_value_x.tv.ver = tv.ver;
@@ -932,7 +933,7 @@ static int handle_write_with_hash_xremap(struct dedup_config *dc, struct bio *bi
 	lbn_tv.type = (ref & TV_TYPE) != 0;
 	lbn_tv.ver = (ref & TV_VER);
 	
-	if (cur_tv.type == 1 || cur_tv.ver != old_tv.ver) {//fp is invalid
+	if (cur_tv.type == 1 || cur_tv.ver >= TV_MAX || cur_tv.ver != old_tv.ver) {//fp is invalid
 		//r = dc->kvs_hash_pbn->kvs_delete(dc->kvs_hash_pbn, (void *)final_hash, dc->crypto_key_size);
 		r = handle_write_no_hash_xremap(dc, bio, lbn, final_hash);
 		if(dc->enable_time_stats)
@@ -1103,7 +1104,7 @@ static int handle_write(struct dedup_config *dc, struct bio *bio)
 			calc_tsc(dc, PERIOD_FUA, PERIOD_START);
 			r = dc->mdops->flush_meta(dc->bmd);
 			calc_tsc(dc, PERIOD_FUA, PERIOD_END);
-			DMINFO("garbage_collect is trigged. gc_needed = %llu", dc->gc_needed);
+			DMINFO("garbage_collect is trigged. gc_needed = %llu, lbn = %llu", dc->gc_needed, lbn);
 			dc->writes_after_flush = 0;
 			dc->gc_needed = 0;
 			return 0;
