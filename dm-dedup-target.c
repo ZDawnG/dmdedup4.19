@@ -1103,7 +1103,7 @@ static int handle_write(struct dedup_config *dc, struct bio *bio)
 			calc_tsc(dc, PERIOD_FUA, PERIOD_START);
 			r = dc->mdops->flush_meta(dc->bmd);
 			calc_tsc(dc, PERIOD_FUA, PERIOD_END);
-			DMINFO("garbage_collect is trigged.");
+			DMINFO("garbage_collect is trigged. gc_needed = %llu", dc->gc_needed);
 			dc->writes_after_flush = 0;
 			dc->gc_needed = 0;
 			return 0;
@@ -1740,28 +1740,6 @@ static void destroy_dedup_args(struct dedup_args *da)
 
 	if (da->data_dev)
 		dm_put_device(da->ti, da->data_dev);
-}
-
-void set_wq_priority(char *wq_name, int nice_val) {
-    struct task_struct *task;
-    struct pid *kp;
-    int pid = 0;
-
-    for_each_process(task) {
-        if (strstr(task->comm, wq_name)) { // 查找工作队列的内核线程
-            pid = task->pid;
-            break;
-        }
-    }
-
-    if (pid) {
-        kp = find_get_pid(pid);
-        task = pid_task(kp, PIDTYPE_PID);
-        if (task) {
-            set_user_nice(task, nice_val);
-        }
-        put_pid(kp);
-    }
 }
 
 /*
