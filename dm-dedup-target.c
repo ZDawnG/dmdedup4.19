@@ -251,7 +251,8 @@ static int calculate_tarSSD(struct dedup_config *dc, u64 lpn) {
 
 static u64 calculate_entry_offset(struct dedup_config *dc, u64 lpn) {
 	u64 offset =0;
-	offset = lpn % (dc->remote_len);
+	if(dc->remote_len)
+		offset = lpn % (dc->remote_len);
 	return offset;
 }
 
